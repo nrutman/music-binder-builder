@@ -4,7 +4,12 @@ This file is the canonical agent-facing reference for this repo. `CLAUDE.md` is 
 
 ## What this repo does
 
-Builds a single, print-ready PDF "binder" of chord sheets for live performance from a list of song titles. Source files are `.doc`/`.docx` chord sheets that live outside the repo (typically in a Google Drive folder). The user gives an agent a setlist, the agent runs the skill, and a merged PDF lands in the user's output folder.
+Builds a single, print-ready PDF "binder" of chord sheets for live performance. Two modes:
+
+1. **Local** — user supplies a list of song titles; the skill fuzzy-matches them against the user's local chord-sheet folder (typically a Google Drive mount).
+2. **Planning Center** — user supplies a service date; the skill calls the Planning Center Services API, finds the plan for that date, walks its song items in order, and pulls each song's chord-sheet attachment.
+
+Either way, the chosen `.doc`/`.docx` files are converted to PDF via LibreOffice and merged into a single binder PDF in the user's output folder.
 
 ## Skill: `build-binder`
 
@@ -30,18 +35,32 @@ Verify with `bash scripts/check_deps.sh`. `pypdf` is declared as an inline dep i
 ## Configuration
 
 - **`.env`** (committed) documents every parameter with blank defaults.
-- **`.env.local`** (gitignored) is where the user sets real values. Required keys: `CHORD_SHEETS_DIR`, `OUTPUT_DIR`.
+- **`.env.local`** (gitignored) is where the user sets real values.
 
-If the script exits with `MISSING_CONFIG`, ask the user for the missing values and write them to `.env.local` (never to `.env`). Re-run.
+Required keys per mode:
+
+| Mode             | Required keys                                                        |
+| ---------------- | -------------------------------------------------------------------- |
+| Local            | `CHORD_SHEETS_DIR`, `OUTPUT_DIR`                                     |
+| Planning Center  | `CHORD_SHEETS_DIR`, `OUTPUT_DIR`, `PCO_APPLICATION_ID`, `PCO_SECRET` |
+
+Optional keys (documented in `.env`): `SOFFICE_PATH`, `FUZZY_MATCH_THRESHOLD`, `PCO_DEFAULT_SERVICE_TYPE_ID`.
+
+If the script exits with `MISSING_CONFIG`, ask the user for the missing values and write them to `.env.local` (never to `.env`), then re-run. **Exception**: never read or write `PCO_APPLICATION_ID` / `PCO_SECRET` yourself. Ask the user to fill those in manually ("Generate a Personal Access Token at https://api.planningcenteronline.com/oauth/applications and paste both halves into `.env.local`").
 
 ## Workflow contract
 
-Always two phases, in order:
+Always two phases, in order. Same contract for both modes — only the subcommand names change.
 
-1. **Resolve** — `uv run scripts/build_binder.py resolve "Title" …`. Surface every candidate (including capo variants) to the user and wait for confirmation. The script never picks for you, and you must not pick for the user either.
+**Local mode** (user gave a setlist of song titles):
+1. **Resolve** — `uv run scripts/build_binder.py resolve "Title" …`. Surface every candidate (including capo variants) to the user and wait for confirmation.
 2. **Build** — `uv run scripts/build_binder.py build [--name "…"] FILE …` with explicit file paths chosen by the user.
 
-Always show the resolved file list to the user before building, even when every title has exactly one candidate.
+**Planning Center mode** (user gave a service date):
+1. **Resolve** — `uv run scripts/build_binder.py pco-resolve --date YYYY-MM-DD […]`. The script picks chord-named attachments where it can; songs with 0 or 2+ chord-named `.doc`/`.docx` attachments exit with `PCO_AMBIGUOUS_ATTACHMENT`. Resolve those by asking the user, then re-run with `--pick SONG_ID=ATTACHMENT_ID`.
+2. **Build** — `uv run scripts/build_binder.py pco-build --date YYYY-MM-DD […] [--name "…"]` with the same flags as the successful resolve. Downloads attachments and runs the same conversion/merge pipeline.
+
+Always show the resolved song list to the user before building, even when every song resolves automatically. The script never builds without an explicit `*-build` call.
 
 ## Layout guarantees (enforced by the script)
 
@@ -68,7 +87,8 @@ Always show the resolved file list to the user before building, even when every 
 ├── skills/build-binder/
 │   └── SKILL.md                    # the skill (canonical)
 └── scripts/
-    ├── build_binder.py             # main `resolve` + `build` script
+    ├── build_binder.py             # main script: resolve/build (local) + pco-resolve/pco-build (PCO)
+    ├── pco.py                      # Planning Center Services API client + plan resolution
     └── check_deps.sh               # verifies uv + LibreOffice
 ```
 

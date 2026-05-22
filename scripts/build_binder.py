@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "pypdf>=4.0.0",
+#     "httpx>=0.27.0",
 # ]
 # ///
 """
@@ -11,21 +12,37 @@ build_binder.py — Build a saddle-stitched chord-sheet binder PDF.
 Subcommands
 -----------
     resolve TITLE [TITLE ...]
-        Fuzzy-match each title against CHORD_SHEETS_DIR (recursively, .doc and
-        .docx) and print every candidate file for each title. The script
-        NEVER picks a candidate on its own — the calling agent must present
-        the list to the user and have them confirm/disambiguate before moving
-        on to `build`.
+        Local mode. Fuzzy-match each title against CHORD_SHEETS_DIR
+        (recursively, .doc and .docx) and print every candidate file for each
+        title. NEVER picks for you — agent presents the list to the user.
 
     build [--name NAME] FILE [FILE ...]
-        Take a list of explicit .doc/.docx file paths (in setlist order),
-        convert each to PDF via LibreOffice, count pages, and produce a single
-        merged PDF in OUTPUT_DIR. Songs are laid out so that:
-          - page 1 is alone
-          - spreads are pages 2-3, 4-5, 6-7, ...
-          - no two-page song ever crosses a spread (a blank page is inserted
-            before it if needed)
-        Stops with an error if any song has more than 2 pages.
+        Local mode. Take explicit .doc/.docx file paths (in setlist order),
+        convert each to PDF via LibreOffice, count pages, lay songs out across
+        spreads, and write the merged PDF to OUTPUT_DIR.
+
+    pco-resolve --date YYYY-MM-DD [--service-type ID] [--plan-id ID]
+                [--pick SONG_ID=ATTACHMENT_ID ...]
+        Planning Center mode. Look up the service plan for the given date,
+        list its songs in plan order, and propose a chord-sheet attachment for
+        each (filter: filename contains "chord" + .doc/.docx). Exits with
+        PCO_AMBIGUOUS_ATTACHMENT if any song has 0 or 2+ chord matches — the
+        agent then resolves them with --pick.
+
+    pco-build --date YYYY-MM-DD [--service-type ID] [--plan-id ID]
+              [--pick SONG_ID=ATTACHMENT_ID ...] [--name NAME]
+        Planning Center mode. Same resolution as pco-resolve, then downloads
+        each attachment and runs the local build pipeline.
+
+Layout (applies to both modes)
+------------------------------
+    - page 1 is alone
+    - spreads are pages 2-3, 4-5, 6-7, ...
+    - no two-page song ever crosses a spread (a blank page is inserted before
+      it if needed)
+    - trailing pages containing only recurring header/footer chrome are
+      auto-trimmed before layout (with a printed warning per song)
+    - a song with >2 effective pages aborts with exit code 4
 
 Exit codes
 ----------
@@ -34,6 +51,7 @@ Exit codes
     3   MISSING_DEPENDENCY      LibreOffice (or other required tool) not found
     4   UNEXPECTED_PAGE_COUNT   a song has >2 pages — agent must ask the user
     5   usage error / file not found / conversion failure
+    6   PCO_*                   PCO ambiguity or not-found (see error message)
 """
 
 from __future__ import annotations
@@ -46,9 +64,12 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+
+# Make sibling modules (pco.py) importable when run via `uv run scripts/...`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -67,6 +88,10 @@ except ModuleNotFoundError as e:
         )
         sys.exit(3)
     raise
+
+# PCO module is imported lazily inside the pco-* subcommands so the local
+# `resolve` / `build` flow doesn't pay the httpx import cost or surface PCO
+# errors when the user isn't using PCO.
 
 
 # ---------------------------------------------------------------------------
@@ -494,26 +519,15 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
 # `build` subcommand
 # ---------------------------------------------------------------------------
 
-def cmd_build(args: argparse.Namespace) -> int:
-    config = load_config()
-
-    files: list[Path] = []
-    for raw in args.files:
-        p = Path(os.path.expanduser(raw)).resolve()
-        if not p.exists():
-            print(f"File not found: {raw}", file=sys.stderr)
-            return 5
-        if p.suffix.lower() not in (".doc", ".docx"):
-            print(f"Unsupported file type ({p.suffix}): {p}", file=sys.stderr)
-            return 5
-        files.append(p)
-
-    if not files:
-        print("usage: build_binder.py build [--name NAME] FILE [FILE ...]", file=sys.stderr)
-        return 5
-
-    binder_name = args.name or f"Binder {date.today().isoformat()}"
-    # Strip a trailing .pdf if the agent supplied one; we add it back.
+def run_build_pipeline(
+    files: list[Path],
+    binder_name: str,
+    config: Config,
+) -> int:
+    """Shared build pipeline used by both `build` and `pco-build`. Takes a
+    list of local .doc/.docx file paths (in setlist order) and produces a
+    binder PDF in `config.output_dir`. The caller owns the lifetime of the
+    input files — this function only creates a temp dir for converted PDFs."""
     if binder_name.lower().endswith(".pdf"):
         binder_name = binder_name[:-4]
     out_path = config.output_dir / f"{binder_name}.pdf"
@@ -541,8 +555,6 @@ def cmd_build(args: argparse.Namespace) -> int:
         print("Merging into binder...")
         placements = merge_into_binder(song_pdfs, out_path)
 
-    # tmp is now deleted by TemporaryDirectory's context manager.
-
     print()
     print(f"Wrote {out_path}")
     print()
@@ -555,6 +567,197 @@ def cmd_build(args: argparse.Namespace) -> int:
             pages_label = f"{p.pages} (-{p.trimmed})"
         print(f"  {i:>2}  {pages_label:>5}  {rng:>8}  {p.source.name}")
     return 0
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    config = load_config()
+
+    files: list[Path] = []
+    for raw in args.files:
+        p = Path(os.path.expanduser(raw)).resolve()
+        if not p.exists():
+            print(f"File not found: {raw}", file=sys.stderr)
+            return 5
+        if p.suffix.lower() not in (".doc", ".docx"):
+            print(f"Unsupported file type ({p.suffix}): {p}", file=sys.stderr)
+            return 5
+        files.append(p)
+
+    if not files:
+        print("usage: build_binder.py build [--name NAME] FILE [FILE ...]", file=sys.stderr)
+        return 5
+
+    binder_name = args.name or f"Binder {date.today().isoformat()}"
+    return run_build_pipeline(files, binder_name, config)
+
+
+# ---------------------------------------------------------------------------
+# Planning Center mode
+# ---------------------------------------------------------------------------
+
+
+def _parse_iso_date(s: str) -> date:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"Bad --date value (expected YYYY-MM-DD): {s!r}", file=sys.stderr)
+        sys.exit(5)
+
+
+def _parse_picks(pick_args: list[str] | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw in pick_args or []:
+        if "=" not in raw:
+            print(
+                f"Bad --pick value (expected SONG_ID=ATTACHMENT_ID): {raw!r}",
+                file=sys.stderr,
+            )
+            sys.exit(5)
+        k, v = raw.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if not k or not v:
+            print(
+                f"Bad --pick value (empty side): {raw!r}",
+                file=sys.stderr,
+            )
+            sys.exit(5)
+        out[k] = v
+    return out
+
+
+def _print_pco_resolutions(
+    resolutions: list,
+    plan: dict,
+    service_type_name: str,
+) -> bool:
+    """Pretty-print the resolution table. Returns True iff every song is
+    picked unambiguously."""
+    plan_attrs = plan["attributes"]
+    plan_title = plan_attrs.get("title") or "(untitled)"
+    plan_date = (plan_attrs.get("sort_date") or "")[:10] or "?"
+    print(f"Service type: {service_type_name}")
+    print(f"Plan:         {plan_title}  (id={plan['id']}, sort_date={plan_date})")
+    print(f"Songs:        {len(resolutions)}")
+    print()
+    all_resolved = True
+    for r in resolutions:
+        print(f"[{r.sequence}] {r.song_title}  (song_id={r.song_id})")
+        if r.picked:
+            tag = "auto" if r.pick_source == "auto" else "user pick"
+            f = r.picked["attributes"].get("filename") or "(no filename)"
+            print(f"      ✓ {f}  (attachment_id={r.picked['id']}, {tag})")
+        else:
+            all_resolved = False
+            if r.chord_candidates:
+                print(
+                    f"      ⚠ {len(r.chord_candidates)} chord-named attachments — pick one:"
+                )
+                for a in r.chord_candidates:
+                    fname = a["attributes"].get("filename") or "(no filename)"
+                    print(f"          attachment_id={a['id']}  {fname}")
+            elif r.doc_candidates:
+                print(
+                    f"      ⚠ no chord-named attachments. Other .doc/.docx on this song:"
+                )
+                for a in r.doc_candidates:
+                    fname = a["attributes"].get("filename") or "(no filename)"
+                    print(f"          attachment_id={a['id']}  {fname}")
+            else:
+                print("      ⚠ no .doc/.docx attachments at all on this song.")
+        print()
+    return all_resolved
+
+
+def _pco_load_env() -> dict[str, str]:
+    """Merged .env + .env.local for PCO config consumption."""
+    return {
+        **load_env_file(REPO_ROOT / ".env"),
+        **load_env_file(REPO_ROOT / ".env.local"),
+    }
+
+
+def _pco_resolve_plan(
+    pco_client,
+    args: argparse.Namespace,
+) -> tuple[dict, str, str, list]:
+    """Shared by pco-resolve and pco-build: resolves the plan + the song
+    list. Returns (plan, service_type_id, service_type_name, resolutions)."""
+    import pco as pcomod  # local import; module already validated httpx
+
+    if args.service_type:
+        st = pcomod.get_service_type(pco_client, args.service_type)
+    else:
+        st = pcomod.find_service_type(pco_client, None)
+    service_type_id = st["id"]
+    service_type_name = st["attributes"]["name"]
+
+    if args.plan_id:
+        plan = pco_client.get(
+            f"/services/v2/service_types/{service_type_id}/plans/{args.plan_id}"
+        )["data"]
+    else:
+        target_date = _parse_iso_date(args.date)
+        plan = pcomod.find_plan_for_date(pco_client, service_type_id, target_date)
+
+    picks = _parse_picks(args.pick)
+    resolutions = pcomod.resolve_plan_songs(
+        pco_client, service_type_id, plan["id"], picks
+    )
+    return plan, service_type_id, service_type_name, resolutions
+
+
+def cmd_pco_resolve(args: argparse.Namespace) -> int:
+    config = load_config()  # validates local config too, so build can follow
+    _ = config  # not used here, but we want the same MISSING_CONFIG semantics
+    import pco as pcomod
+
+    pco_config = pcomod.load_pco_config(_pco_load_env())
+    with pcomod.PCOClient(pco_config) as client:
+        plan, _stid, st_name, resolutions = _pco_resolve_plan(client, args)
+        all_resolved = _print_pco_resolutions(resolutions, plan, st_name)
+
+    if not all_resolved:
+        sys.stderr.write(
+            "\nPCO_AMBIGUOUS_ATTACHMENT: some songs need disambiguation. Show the\n"
+            "list above to the user. For each unresolved song, re-run with\n"
+            "--pick SONG_ID=ATTACHMENT_ID (one --pick per song).\n"
+        )
+        return 6
+
+    print("Next step: confirm the list with the user, then run pco-build with the same")
+    print("arguments plus --name \"...\" to produce the binder.")
+    return 0
+
+
+def cmd_pco_build(args: argparse.Namespace) -> int:
+    config = load_config()
+    import pco as pcomod
+
+    pco_config = pcomod.load_pco_config(_pco_load_env())
+    with pcomod.PCOClient(pco_config) as client:
+        plan, _stid, st_name, resolutions = _pco_resolve_plan(client, args)
+        all_resolved = _print_pco_resolutions(resolutions, plan, st_name)
+        if not all_resolved:
+            sys.stderr.write(
+                "\nPCO_AMBIGUOUS_ATTACHMENT: cannot build until every song is picked.\n"
+                "Re-run pco-resolve first and add --pick SONG_ID=ATTACHMENT_ID for\n"
+                "each unresolved song.\n"
+            )
+            return 6
+
+        target_date = _parse_iso_date(args.date)
+        binder_name = args.name or f"Binder {target_date.isoformat()}"
+
+        with tempfile.TemporaryDirectory(prefix="music-binder-pco-dl-") as dl_str:
+            dl = Path(dl_str)
+            print(f"Downloading {len(resolutions)} attachment(s) from PCO...")
+            try:
+                files = pcomod.download_resolved_attachments(client, resolutions, dl)
+            except pcomod.PCOError as e:
+                sys.stderr.write(f"\nPCO download failed: {e}\n")
+                return 5
+            print()
+            return run_build_pipeline(files, binder_name, config)
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +788,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_build.add_argument("files", nargs="+", help="Source files in setlist order.")
     p_build.set_defaults(func=cmd_build)
+
+    def _add_pco_common_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--date",
+            required=True,
+            help="Service date in YYYY-MM-DD. The plan with a sort_date on this day is used.",
+        )
+        parser.add_argument(
+            "--service-type",
+            help="PCO Service Type ID. Overrides PCO_DEFAULT_SERVICE_TYPE_ID for this call.",
+        )
+        parser.add_argument(
+            "--plan-id",
+            help="PCO Plan ID. Use when multiple plans share the same date.",
+        )
+        parser.add_argument(
+            "--pick",
+            action="append",
+            metavar="SONG_ID=ATTACHMENT_ID",
+            help=(
+                "Resolve a specific song to a specific attachment. Repeatable. "
+                "Use when a song has 0 or 2+ chord-named attachments."
+            ),
+        )
+
+    p_pco_resolve = sub.add_parser(
+        "pco-resolve",
+        help="Resolve a Planning Center plan by date and print the proposed song list.",
+    )
+    _add_pco_common_args(p_pco_resolve)
+    p_pco_resolve.set_defaults(func=cmd_pco_resolve)
+
+    p_pco_build = sub.add_parser(
+        "pco-build",
+        help="Resolve a PCO plan, download its chord sheets, and build the binder.",
+    )
+    _add_pco_common_args(p_pco_build)
+    p_pco_build.add_argument(
+        "--name",
+        help="Binder filename (without .pdf). Defaults to 'Binder YYYY-MM-DD'.",
+    )
+    p_pco_build.set_defaults(func=cmd_pco_build)
 
     return p
 

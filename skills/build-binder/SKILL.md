@@ -1,16 +1,19 @@
 ---
 name: build-binder
 description: >
-  Build a printable PDF "binder" of chord sheets for live performance from a list
-  of song titles. Fuzzy-matches each title against the user's chord-sheet folder,
-  shows all candidates to the user for confirmation (including capo variants),
-  converts the chosen .doc/.docx files to PDF via LibreOffice, and merges them so
-  page 1 is alone and every two-page song lands on a single spread (2-3, 4-5,
-  6-7, …) without crossing.
+  Build a printable PDF "binder" of chord sheets for live performance. Works in
+  two modes: (1) LOCAL — user supplies a list of song titles; the skill
+  fuzzy-matches them against the user's chord-sheet folder; (2) PLANNING CENTER
+  — user supplies a service date; the skill looks up the Planning Center
+  Services plan for that date and pulls the chord-sheet attachment for each
+  song in plan order. In both modes the chosen .doc/.docx files are converted
+  to PDF via LibreOffice and merged so page 1 is alone and every two-page song
+  lands on a single spread (2-3, 4-5, 6-7, …) without crossing.
   TRIGGER when: the user asks to build a binder, setlist PDF, chord sheet binder,
-  worship binder, or similar — and supplies (or is willing to supply) a list of
-  song titles. Phrases like "build a binder for Sunday", "make me a chord sheet
-  PDF with these songs", "binder this setlist".
+  worship binder, etc. — either with a list of song titles (local mode) or with
+  a service date / "the Sunday service" / "this week's plan" (PCO mode). Phrases
+  like "build a binder for Sunday May 24", "make me a chord sheet PDF with
+  these songs", "binder this setlist", "build a binder from Planning Center".
   DO NOT TRIGGER when: the user wants to author or edit a chord sheet (that's a
   different repo / workflow), wants to merge already-PDF files (this skill is for
   .doc/.docx source files), or is asking general questions about the repo.
@@ -40,25 +43,40 @@ This skill catalogs every global tool it needs. If any are missing, **stop and a
 
 On the first use of this skill in a session, **run `bash scripts/check_deps.sh`** to verify both. If anything is missing, surface the install command to the user and stop until they confirm it's installed.
 
-`pypdf` is declared as an inline dependency in the script's PEP 723 header and is installed automatically by `uv` on first run — no separate install step.
+`pypdf` and `httpx` are declared as inline dependencies in the script's PEP 723 header and are installed automatically by `uv` on first run — no separate install step.
 
 ## Configuration
 
 Two files at the repo root:
 
 - **`.env`** (committed) lists every parameter with documentation and blank values.
-- **`.env.local`** (gitignored) is where the user sets real machine-specific values. Required keys: `CHORD_SHEETS_DIR`, `OUTPUT_DIR`.
+- **`.env.local`** (gitignored) is where the user sets real machine-specific values.
+
+Required keys per mode:
+
+| Mode             | Required keys                                              |
+| ---------------- | ---------------------------------------------------------- |
+| Local (`build`)  | `CHORD_SHEETS_DIR`, `OUTPUT_DIR`                           |
+| PCO (`pco-build`)| `CHORD_SHEETS_DIR`*, `OUTPUT_DIR`, `PCO_APPLICATION_ID`, `PCO_SECRET` |
+
+\* `CHORD_SHEETS_DIR` is still validated (the script loads one config) but isn't actually read in PCO mode — keep it set.
 
 If the script exits with `MISSING_CONFIG`:
-1. Ask the user for the missing values (typically `CHORD_SHEETS_DIR` and `OUTPUT_DIR`; possibly `SOFFICE_PATH`).
-2. Write/update `.env.local` with the values.
+1. Ask the user for the missing values. **Never read or quote the user's PCO credentials yourself.** Instead, tell the user which keys are missing and ask them to fill in `.env.local` manually.
+2. For non-credential keys (`CHORD_SHEETS_DIR`, `OUTPUT_DIR`, etc.) you can write `.env.local` directly with the values the user supplied.
 3. Re-run.
 
 Don't write to `.env` — that file documents defaults for the repo, not the user's machine.
 
-## Workflow
+### Planning Center credential handling
 
-Always follow this exact sequence:
+`PCO_APPLICATION_ID` and `PCO_SECRET` are sensitive. Do not echo them, do not paste them into chat, and do not read them from `.env.local` to display. If the user needs to set them, instruct:
+
+> Generate a Personal Access Token at https://api.planningcenteronline.com/oauth/applications (→ Personal Access Tokens → New). Paste both halves into `.env.local` yourself — I won't touch your credentials.
+
+## Workflow — Local mode
+
+Use when the user supplies song titles. Always follow this exact sequence:
 
 ### 1. Verify dependencies (first use in a session)
 
@@ -103,15 +121,69 @@ The `--name` argument is optional — defaults to `Binder YYYY-MM-DD.pdf`. Pick 
 
 The script prints a layout table — relay it. Confirm the final PDF path in `OUTPUT_DIR`.
 
+## Workflow — Planning Center mode
+
+Use when the user supplies a service date (or asks for "the Sunday service", "this week's plan", etc.) rather than a song list. Same iron rules apply: always present the resolved song list to the user and wait for confirmation before building.
+
+### 1. Verify dependencies (first use in a session)
+
+Same `bash scripts/check_deps.sh` as local mode.
+
+### 2. Resolve the plan → song list with attachment picks
+
+```bash
+uv run scripts/build_binder.py pco-resolve --date 2026-05-24
+```
+
+This:
+- Looks up the PCO plan whose `sort_date` falls on the given date.
+- Lists every song item in plan order.
+- For each song, picks the `.doc`/`.docx` attachment whose filename contains "Chord" (case-insensitive) when exactly one matches.
+- For songs with 0 or 2+ chord-named attachments, reports the candidates and exits with `PCO_AMBIGUOUS_ATTACHMENT` (exit code 6).
+
+### 3. Handle ambiguities and special cases
+
+- **`PCO_AMBIGUOUS_SERVICE_TYPE`** — the org has multiple service types. Show the list to the user, then re-run with `--service-type <ID>` (or have the user set `PCO_DEFAULT_SERVICE_TYPE_ID` in `.env.local` for future calls).
+- **`PCO_NO_PLAN_FOR_DATE`** — no plan on that date. Confirm the date with the user and the service type.
+- **`PCO_AMBIGUOUS_PLAN`** — multiple plans on the same date. Show titles to the user and re-run with `--plan-id <ID>`.
+- **`PCO_AMBIGUOUS_ATTACHMENT`** — some songs need a `--pick`. For each unresolved song, show the user every candidate attachment (chord-named ones if any, else all `.doc`/`.docx` on the song). Collect picks from the user, then re-run:
+  ```bash
+  uv run scripts/build_binder.py pco-resolve --date 2026-05-24 \
+    --pick 12345=67890 \
+    --pick 12346=67891
+  ```
+  `SONG_ID` and `ATTACHMENT_ID` are both shown in the resolve output. Keep accumulating picks until `pco-resolve` exits 0.
+
+### 4. Confirm the full song list with the user
+
+Even when `pco-resolve` exits 0 with no ambiguities, **always show the resolved list to the user and wait for confirmation** before building. Same iron rule as local mode.
+
+### 5. Build the binder
+
+Re-run with `pco-build`, passing the same `--date` (and any `--service-type` / `--plan-id` / `--pick` arguments), plus an optional `--name`:
+
+```bash
+uv run scripts/build_binder.py pco-build --date 2026-05-24 \
+  --name "Sunday May 24" \
+  --pick 12345=67890
+```
+
+This downloads each chord sheet from PCO into a temp dir, converts and merges via the same pipeline as local mode, then cleans up.
+
+### 6. Report the result
+
+Same as local mode — relay the layout table and the final PDF path. Surface any `⚠ trimmed N trailing chrome-only page(s)` warnings to the user (see [Trailing-chrome trimming](#trailing-chrome-trimming)).
+
 ## Exit codes (handle these explicitly)
 
 | Code | Meaning                  | What to do                                                                                                  |
 | ---- | ------------------------ | ----------------------------------------------------------------------------------------------------------- |
 | 0    | Success                  | Show the user the layout table and final PDF path.                                                          |
-| 2    | `MISSING_CONFIG`         | Ask user for the missing values, write `.env.local`, re-run.                                                |
+| 2    | `MISSING_CONFIG`         | Ask user for the missing values. For non-credentials, write `.env.local` yourself. For PCO credentials, ask the user to fill in `.env.local` manually — don't read or echo them. Re-run. |
 | 3    | `MISSING_DEPENDENCY`     | Surface the install command, stop until the user confirms install.                                          |
 | 4    | `UNEXPECTED_PAGE_COUNT`  | A song has >2 pages. Stop and ask the user (trim the source, exclude it, or override).                      |
 | 5    | Usage / file error       | Show the error to the user and ask for guidance.                                                            |
+| 6    | `PCO_*`                  | PCO-specific (ambiguous service type / plan / attachment, or none found). Read the printed error, surface to user, then re-run with the appropriate `--service-type` / `--plan-id` / `--pick` flag(s). |
 
 ## Layout algorithm (for reference)
 

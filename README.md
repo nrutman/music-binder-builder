@@ -1,8 +1,13 @@
 # music-binder-builder
 
-Turn a list of song titles into a single, print-ready PDF "binder" of chord sheets — page 1 alone, every two-page song on a clean spread, no awkward page turns mid-song.
+Turn a setlist into a single, print-ready PDF "binder" of chord sheets — page 1 alone, every two-page song on a clean spread, no awkward page turns mid-song.
 
-You give an agent a setlist. The agent fuzzy-matches each title against your chord-sheet folder, shows you the candidates (so capo variants don't get picked silently), converts the chosen `.doc`/`.docx` files to PDF via LibreOffice, and drops a merged binder in your output folder.
+Two ways to feed it:
+
+- **Local mode** — give an agent a list of song titles. The agent fuzzy-matches each title against your chord-sheet folder, shows you the candidates (so capo variants don't get picked silently), and builds the binder.
+- **Planning Center mode** — give an agent a service date. The agent calls the Planning Center Services API, walks your service plan in order, pulls each song's chord-sheet attachment, and builds the binder.
+
+Either way, the chosen `.doc`/`.docx` files get converted to PDF via LibreOffice and merged into a single binder in your output folder.
 
 ## Quick start
 
@@ -30,35 +35,45 @@ cp .env.local.example .env.local
 $EDITOR .env.local
 ```
 
-Required keys:
+Required keys (always):
 
 | Key                 | What it is                                                              |
 | ------------------- | ----------------------------------------------------------------------- |
 | `CHORD_SHEETS_DIR`  | Absolute path to your folder of `.doc`/`.docx` chord sheets (recursive) |
 | `OUTPUT_DIR`        | Where generated binder PDFs land                                        |
 
+Required only for Planning Center mode:
+
+| Key                     | What it is                                                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `PCO_APPLICATION_ID`    | Planning Center Personal Access Token — application ID half. Generate at <https://api.planningcenteronline.com/oauth/applications>. |
+| `PCO_SECRET`            | Personal Access Token secret half (paired with the application ID above).                                   |
+
 Optional keys (documented in `.env`):
 
-| Key                     | What it is                                                       |
-| ----------------------- | ---------------------------------------------------------------- |
-| `SOFFICE_PATH`          | Path to LibreOffice's `soffice`. Leave blank to autodetect.      |
-| `FUZZY_MATCH_THRESHOLD` | Min similarity score for title→filename matching (default 0.75). |
+| Key                            | What it is                                                                                  |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| `SOFFICE_PATH`                 | Path to LibreOffice's `soffice`. Leave blank to autodetect.                                 |
+| `FUZZY_MATCH_THRESHOLD`        | Min similarity score for title→filename matching (default 0.75).                            |
+| `PCO_DEFAULT_SERVICE_TYPE_ID`  | Default service type ID. Only useful if your org has multiple service types in PCO.         |
 
-The build script refuses to run if `CHORD_SHEETS_DIR` or `OUTPUT_DIR` is unset, and tells you exactly what to add.
+The build script refuses to run if `CHORD_SHEETS_DIR` or `OUTPUT_DIR` is unset, and tells you exactly what to add. The PCO subcommands additionally require `PCO_APPLICATION_ID` and `PCO_SECRET`.
 
 ### 3. Build a binder (via an agent)
 
-The skill is auto-wired for pi (via `.agents/skills/`) and Claude Code (via `.claude/skills/`) when you start a session in this directory. Just ask:
+The skill is auto-wired for pi (via `.agents/skills/`) and Claude Code (via `.claude/skills/`) when you start a session in this directory. Either way, just ask:
 
 > Build me a binder for Sunday with Amazing Grace, How Great Thou Art, and Come Thou Fount.
 
-The agent will:
+…or with Planning Center:
 
-1. Resolve each title against `CHORD_SHEETS_DIR` and **show you the candidates** (including any capo variants).
-2. Wait for you to confirm the file list.
-3. Convert each to PDF, lay them out so two-page songs land on a single spread, and write the merged PDF to `OUTPUT_DIR`.
+> Build me a binder from the May 24 Sunday service.
+
+The agent will resolve the song list, **show you the candidates** (including any capo variants or PCO attachment choices), wait for your confirmation, and then build the binder.
 
 ### 4. Build a binder (manually)
+
+**Local mode** — you supply a setlist:
 
 ```bash
 # Step 1 — see what matches
@@ -70,6 +85,22 @@ uv run scripts/build_binder.py build \
   "/path/to/Amazing Grace.docx" \
   "/path/to/How Great Thou Art (Capo 2).docx"
 ```
+
+**Planning Center mode** — you supply a service date:
+
+```bash
+# Step 1 — resolve the plan + propose attachments. Exits 6 if any song has
+# 0 or 2+ chord-named .doc/.docx attachments; re-run with --pick to resolve.
+uv run scripts/build_binder.py pco-resolve --date 2026-05-24
+
+# Step 2 — download attachments and build the binder. Pass any --pick flags
+# you needed in step 1.
+uv run scripts/build_binder.py pco-build --date 2026-05-24 \
+  --name "Sunday May 24" \
+  --pick 12345=67890
+```
+
+`SONG_ID` and `ATTACHMENT_ID` are both shown in the `pco-resolve` output.
 
 ## How the layout works
 
@@ -88,14 +119,15 @@ uv run scripts/build_binder.py build \
 ├── CLAUDE.md  → AGENTS.md  # symlink
 ├── README.md               # this file
 ├── .env                    # documented blank defaults
-├── .env.local              # (gitignored) your machine paths
+├── .env.local              # (gitignored) your machine paths + PCO creds
 ├── .env.local.example      # template
 ├── .agents/skills/build-binder  → ../../skills/build-binder   # pi auto-discovery
 ├── .claude/skills/build-binder  → ../../skills/build-binder   # Claude Code auto-discovery
 ├── skills/build-binder/
 │   └── SKILL.md            # the skill (canonical)
 └── scripts/
-    ├── build_binder.py     # `resolve` + `build` subcommands
+    ├── build_binder.py     # local resolve/build + PCO pco-resolve/pco-build subcommands
+    ├── pco.py              # Planning Center Services API client + plan resolution
     └── check_deps.sh       # verify uv + LibreOffice
 ```
 
@@ -110,8 +142,12 @@ Both symlinks point at the same `skills/build-binder/` directory, so edits propa
 
 ## Troubleshooting
 
-- **`MISSING_CONFIG`** — `.env.local` is missing or doesn't set a required key. Open it and set `CHORD_SHEETS_DIR` and `OUTPUT_DIR`.
+- **`MISSING_CONFIG`** — `.env.local` is missing or doesn't set a required key. For local mode set `CHORD_SHEETS_DIR` and `OUTPUT_DIR`. For PCO mode also set `PCO_APPLICATION_ID` and `PCO_SECRET`.
 - **`MISSING_DEPENDENCY: LibreOffice`** — `brew install --cask libreoffice`, or set `SOFFICE_PATH` in `.env.local` if it lives somewhere unusual.
-- **No candidates found for a title** — try a longer or more distinctive piece of the title, or check the filename in `CHORD_SHEETS_DIR`. You can also tune `FUZZY_MATCH_THRESHOLD` down a bit, but the safer fix is to ask the agent to search with a better query.
-- **Multiple candidates for one title** — that's the point of the resolve step. Pick the file you want and pass its full path to `build`.
+- **No candidates found for a title** (local) — try a longer or more distinctive piece of the title, or check the filename in `CHORD_SHEETS_DIR`. You can also tune `FUZZY_MATCH_THRESHOLD` down a bit, but the safer fix is to ask the agent to search with a better query.
+- **Multiple candidates for one title** (local) — that's the point of the resolve step. Pick the file you want and pass its full path to `build`.
+- **`PCO_AMBIGUOUS_SERVICE_TYPE`** — your org has multiple service types. Re-run with `--service-type <ID>` or set `PCO_DEFAULT_SERVICE_TYPE_ID` in `.env.local`.
+- **`PCO_NO_PLAN_FOR_DATE`** — no plan exists on that date for the chosen service type. Double-check the date and service type in PCO.
+- **`PCO_AMBIGUOUS_PLAN`** — multiple plans on the same date. Re-run with `--plan-id <ID>` picked from the listed candidates.
+- **`PCO_AMBIGUOUS_ATTACHMENT`** — a song has 0 or 2+ chord-named attachments. The resolve output lists candidates; re-run with `--pick SONG_ID=ATTACHMENT_ID` (repeatable).
 - **A song has > 2 pages** — the script aborts. Trim the source `.docx` or exclude the song from the setlist.
