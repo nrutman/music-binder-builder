@@ -139,7 +139,7 @@ The script prints a layout table — relay it. Confirm the final PDF path in `OU
 
 ## Workflow — Planning Center mode
 
-Use when the user supplies a service date (or asks for "the Sunday service", "this week's plan", etc.) rather than a song list. Same iron rules apply: always present the resolved song list to the user and wait for confirmation before building.
+Use when the user supplies a service date (or asks for "the Sunday service", "this week's plan", etc.) rather than a song list. Same iron rules apply. The [Confirmation policy](#confirmation-policy) governs whether to block on user confirmation — *not* the older "always confirm" rule.
 
 ### 1. Verify dependencies (first use in a session)
 

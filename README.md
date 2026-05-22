@@ -69,7 +69,7 @@ The skill is auto-wired for pi (via `.agents/skills/`) and Claude Code (via `.cl
 
 > Build me a binder from the May 24 Sunday service.
 
-The agent will resolve the song list, **show you the candidates** (including any capo variants or PCO attachment choices), wait for your confirmation, and then build the binder.
+The agent will resolve the song list, **show you the candidates** (including any capo variants or PCO attachment choices), and either go straight to building (if everything resolved cleanly) or wait for you to disambiguate first. See [Confirmation policy](skills/build-binder/SKILL.md#confirmation-policy) in the skill for the exact rule.
 
 ### 4. Build a binder (manually)
 
@@ -123,14 +123,17 @@ uv run scripts/build_binder.py pco-build --date 2026-05-24 \
 ├── .env                    # documented blank defaults
 ├── .env.local              # (gitignored) your machine paths + PCO creds
 ├── .env.local.example      # template
+├── .github/workflows/ci.yml # CI: ruff, pytest, hygiene checks, gitleaks, E2E
+├── pyproject.toml          # ruff + pytest config, test-only deps
 ├── .agents/skills/build-binder  → ../../skills/build-binder   # pi auto-discovery
 ├── .claude/skills/build-binder  → ../../skills/build-binder   # Claude Code auto-discovery
 ├── skills/build-binder/
 │   └── SKILL.md            # the skill (canonical)
-└── scripts/
-    ├── build_binder.py     # local resolve/build + PCO pco-resolve/pco-build subcommands
-    ├── pco.py              # Planning Center Services API client + plan resolution
-    └── check_deps.sh       # verify uv + LibreOffice
+├── scripts/
+│   ├── build_binder.py     # main script: resolve/build (local) + pco-* subcommands
+│   ├── pco.py              # Planning Center Services API client + plan resolution
+│   └── check_deps.sh       # verify uv + LibreOffice
+└── tests/                  # pytest suite (run with: uv run pytest)
 ```
 
 ## How the skill is auto-wired
@@ -141,6 +144,55 @@ uv run scripts/build_binder.py pco-build --date 2026-05-24 \
 - `.claude/skills/build-binder` → Claude Code scans `.claude/skills/` for project-scoped skills.
 
 Both symlinks point at the same `skills/build-binder/` directory, so edits propagate everywhere.
+
+## Development
+
+If you want to change the scripts or the skill, the toolchain is configured in `pyproject.toml`.
+
+### One-time setup
+
+```bash
+uv sync --extra test
+```
+
+Installs `ruff`, `pytest`, and the libraries the test suite needs (`pypdf`, `httpx`, `python-docx`) into a local `.venv/`.
+
+### Run the checks locally
+
+```bash
+uv run ruff format --check .   # formatting
+uv run ruff check .            # lint
+uv run pytest -m "not e2e"     # ~1s, unit tests only
+uv run pytest -m e2e           # ~15s, requires LibreOffice installed
+uv run pytest                  # everything
+bash scripts/check_deps.sh     # verify global tools
+```
+
+Auto-fix style and import issues with `uv run ruff format .` and `uv run ruff check --fix .`.
+
+### What's tested
+
+The pytest suite focuses on places where a silent bug would produce a wrong binder, not coverage targets:
+
+- **`test_layout`** — the pure `plan_layout()` spread math (blank-page insertion, two-page-songs-never-cross-a-spread invariants).
+- **`test_trim`** — the trailing-chrome-page trim heuristic, including the 5-word threshold boundary.
+- **`test_fuzzy`** — `normalize()` + `score_filename()`, pinned at the 0.75 default threshold.
+- **`test_env`** — `.env` / `.env.local` parsing, including the merge precedence.
+- **`test_picks`** — the `--pick SONG_ID=ATTACHMENT_ID` parser.
+- **`test_pco`** — PCO client + resolution via `httpx.MockTransport` (Key-vs-Arrangement-vs-Song parent-path construction, capo ambiguity, `--pick` overrides, pagination).
+- **`test_e2e`** (marked `@pytest.mark.e2e`) — drives real LibreOffice + `python-docx` fixtures to catch regressions in trim/layout against actual LO output. Skipped automatically when `soffice` isn't installed.
+
+### Repository workflow
+
+Main is protected. To make a change:
+
+1. Branch off main: `git checkout -b your-branch`.
+2. Make changes, run the checks above.
+3. Push and open a PR with `gh pr create`.
+4. CI runs two jobs in parallel: **Lint, hygiene, unit tests** (<10s) and **End-to-end (LibreOffice)** (~2min). Both must pass.
+5. Squash-merge — it's the only merge mode allowed. `gh pr merge --squash --delete-branch` does it in one shot.
+
+Direct pushes to `main`, merge commits, and force-pushes are all blocked by the repo ruleset.
 
 ## Troubleshooting
 

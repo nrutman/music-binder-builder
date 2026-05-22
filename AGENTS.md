@@ -71,6 +71,10 @@ Always include the resolved song list in your reply so the user can spot-check. 
 - A song with >2 pages (after chrome trimming) aborts with exit code 4 — stop and ask the user.
 - Trailing pages that contain only recurring header/footer chrome (page-number header, song-title line, copyright/CCLI) are auto-trimmed before page counting and merging. A `⚠ ...trimmed N trailing chrome-only page(s)` warning is printed for each affected song. **Always alert the user explicitly** about trims after a build and recommend they examine the source file — a trim usually means the source has a stray trailing paragraph that should be cleaned up. Never edit the source file yourself; flag it and let the user decide. See the skill's *Trailing-chrome trimming* section for suggested phrasing.
 
+## Diagnostics
+
+If PCO mode misbehaves (auth errors, unexpected shapes, missing attachments), run `uv run scripts/build_binder.py pco-doctor`. It's a read-only command that walks the API path the resolver uses (service types → plans → items → attachments at Song/Arrangement/Key/Item level) for a recent past plan and prints structural info only — no credentials. Useful for verifying a freshly configured `.env.local`.
+
 ## File map
 
 ```
@@ -82,18 +86,46 @@ Always include the resolved song list in your reply so the user can spot-check. 
 ├── .env.local                      # (gitignored) user's real values
 ├── .env.local.example              # template
 ├── .gitignore
+├── .github/workflows/ci.yml        # CI: ruff, pytest, hygiene checks, gitleaks, E2E
+├── pyproject.toml                  # ruff + pytest config, test-only deps
 ├── .agents/skills/build-binder  → ../../skills/build-binder   # pi auto-discovery
 ├── .claude/skills/build-binder  → ../../skills/build-binder   # Claude Code auto-discovery
 ├── skills/build-binder/
 │   └── SKILL.md                    # the skill (canonical)
-└── scripts/
-    ├── build_binder.py             # main script: resolve/build (local) + pco-resolve/pco-build (PCO)
-    ├── pco.py                      # Planning Center Services API client + plan resolution
-    └── check_deps.sh               # verifies uv + LibreOffice
+├── scripts/
+│   ├── build_binder.py             # main: resolve/build (local) + pco-resolve/pco-build/pco-doctor
+│   ├── pco.py                      # Planning Center Services API client + plan resolution
+│   └── check_deps.sh               # verifies uv + LibreOffice
+└── tests/                          # pytest suite (run with `uv run pytest`)
 ```
+
+## Development workflow (when changing code, not just running it)
+
+Main is a protected branch. To make a change:
+
+1. Branch off main: `git checkout -b your-branch`.
+2. Make changes. Add or update tests for any non-trivial behavior change.
+3. Run the local check suite — same things CI runs:
+   ```bash
+   uv sync --extra test
+   uv run ruff format --check .
+   uv run ruff check .
+   uv run pytest                # includes e2e if LibreOffice is installed locally
+   ```
+4. Push and open a PR (`gh pr create`).
+5. CI runs two jobs in parallel:
+   - **Lint, hygiene, unit tests** — ruff, unit pytest, symlink validity, sensitive-keys-blank check, script `+x` check, gitleaks. (~10s)
+   - **End-to-end (LibreOffice)** — installs LibreOffice, runs `pytest -m e2e`. (~2min)
+   Both must pass; both are required by branch protection.
+6. Squash-merge — only allowed merge mode (`gh pr merge --squash --delete-branch`).
+
+Do NOT push directly to `main`. The repo ruleset blocks it server-side. Force-pushes and branch deletion are also blocked.
 
 ## When adding things
 
-- A new config parameter? Add it to `.env` with documentation + a blank value, then document overrides in `README.md` → Setup.
-- A new dependency? Add it to `scripts/check_deps.sh` AND the dependency table in `skills/build-binder/SKILL.md` AND this file. The skill must catalog every global dependency.
-- A new script? Document it in the README and (if agent-invocable) in the skill.
+- **New config parameter?** Add it to `.env` with documentation + a blank value. If sensitive (credential), add it to the `SENSITIVE_KEYS` list in `.github/workflows/ci.yml` so CI enforces it stays blank in the committed `.env`. Then document overrides in `README.md` → Setup.
+- **New global dependency?** Add it to `scripts/check_deps.sh` AND the dependency table in `skills/build-binder/SKILL.md` AND this file. The skill must catalog every global dependency.
+- **New Python dependency?** If it's a runtime dep, add it to the PEP 723 header of the script that uses it. If it's a test/lint dep, add it to `pyproject.toml`'s `[project.optional-dependencies].test`.
+- **New behavior worth a test?** Add it to `tests/`. The unit suite is fast (~1s) and lives in pure-logic files; the `@pytest.mark.e2e` suite needs LibreOffice. Match the existing file naming (`test_<area>.py`).
+- **New script?** Document it in the README and (if agent-invocable) in the skill. Make it `+x` so the CI hygiene check passes.
+- **New required CI status check?** After it lands and runs once, add its job name to the repo ruleset (`gh api repos/.../rulesets/...`).
