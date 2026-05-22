@@ -80,9 +80,17 @@ jobs:
           done
 
       - name: Gitleaks — secret scan
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # We run the binary directly rather than gitleaks/gitleaks-action@v2
+        # so we don't need pull-requests: write permission (the action uses
+        # it to comment on PRs). `detect` scans both the working tree and
+        # the full git history.
+        run: |
+          set -e
+          version="8.21.2"
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          tar xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --source . --no-banner --redact --verbose
 
   # -------------------------------------------------------------------------
   # Slow tier: end-to-end test that actually runs LibreOffice. Splitting it
