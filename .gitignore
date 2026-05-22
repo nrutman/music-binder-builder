@@ -1,0 +1,15 @@
+# Local, machine-specific config (paths, etc.) — see .env for the full list of
+# parameters and create your own .env.local to override them.
+.env.local
+
+# OS noise
+.DS_Store
+
+# Editor noise
+.vscode/
+.idea/
+
+# Python / uv caches in case anyone runs locally
+__pycache__/
+*.pyc
+.venv/
