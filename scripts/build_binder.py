@@ -355,9 +355,66 @@ def convert_to_pdf(src: Path, out_dir: Path, soffice: Path) -> Path:
 class SongPlacement:
     source: Path
     pdf: Path
-    pages: int
-    binder_start: int  # 1-indexed page in the final binder
-    binder_end: int    # 1-indexed inclusive
+    pages: int           # effective page count after trimming
+    raw_pages: int       # original page count from conversion
+    trimmed: int         # how many trailing chrome-only pages were dropped
+    binder_start: int    # 1-indexed page in the final binder
+    binder_end: int      # 1-indexed inclusive
+
+
+_TRIM_MIN_UNIQUE_WORDS = 5
+
+
+def _normalize_line(line: str) -> str:
+    """Normalize a line for cross-page comparison: lowercase, collapse digits
+    (so 'Page 1 of 2' and 'Page 2 of 2' match), collapse whitespace."""
+    line = line.lower().strip()
+    line = re.sub(r"\d+", "#", line)
+    line = re.sub(r"\s+", " ", line)
+    return line
+
+
+def _page_lines(page) -> list[str]:
+    text = page.extract_text() or ""
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def effective_page_count(reader: PdfReader) -> tuple[int, int]:
+    """Return (effective_pages, trimmed_count).
+
+    Walks from the last page backwards. A page is “chrome-only” (and trimmed)
+    when every one of its lines, after normalization, also appears on an
+    earlier page — i.e. the page contains only recurring header/footer
+    boilerplate (page-number header, song title, copyright, CCLI #). Stops at
+    the first non-chrome page, and never trims the first page.
+    """
+    total = len(reader.pages)
+    if total <= 1:
+        return total, 0
+
+    prior_norms: set[str] = set()
+    for i in range(total - 1):
+        for line in _page_lines(reader.pages[i]):
+            prior_norms.add(_normalize_line(line))
+
+    trimmed = 0
+    # Walk backwards from the last page, trimming chrome-only pages.
+    for i in range(total - 1, 0, -1):
+        lines = _page_lines(reader.pages[i])
+        unique = [ln for ln in lines if _normalize_line(ln) not in prior_norms]
+        unique_words = sum(len(ln.split()) for ln in unique)
+        if unique_words < _TRIM_MIN_UNIQUE_WORDS:
+            trimmed += 1
+            # When trimming page i, recompute prior_norms to exclude it so an
+            # earlier page can still trim against pages before it.
+            prior_norms = set()
+            for j in range(i - 1):
+                for line in _page_lines(reader.pages[j]):
+                    prior_norms.add(_normalize_line(line))
+        else:
+            break
+
+    return total - trimmed, trimmed
 
 
 def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> list[SongPlacement]:
@@ -368,20 +425,30 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
     placements: list[SongPlacement] = []
     position = 1  # 1-indexed page counter for the final binder
 
-    # Open all readers up front so we can fail fast on a corrupt PDF.
-    readers: list[tuple[Path, Path, PdfReader]] = []
+    # Open all readers up front so we can fail fast on a corrupt PDF, and
+    # compute effective page counts (after trimming trailing chrome-only
+    # pages) so layout decisions use post-trim counts.
+    prepared: list[tuple[Path, Path, PdfReader, int, int]] = []
     for source, pdf in song_pdfs:
-        readers.append((source, pdf, PdfReader(str(pdf))))
+        reader = PdfReader(str(pdf))
+        effective, trimmed = effective_page_count(reader)
+        if trimmed:
+            noun = "page" if trimmed == 1 else "pages"
+            print(
+                f"  ⚠ {source.name}: trimmed {trimmed} trailing chrome-only "
+                f"{noun} (only header/footer content)"
+            )
+        prepared.append((source, pdf, reader, effective, trimmed))
 
-    # Validate page counts before writing anything.
-    for source, _pdf, reader in readers:
-        n = len(reader.pages)
-        if n < 1:
+    # Validate effective page counts before writing anything.
+    for source, _pdf, _reader, effective, _trimmed in prepared:
+        if effective < 1:
             print(f"Conversion produced a 0-page PDF for {source!r}.", file=sys.stderr)
             sys.exit(5)
-        if n > 2:
+        if effective > 2:
             print(
-                f"UNEXPECTED_PAGE_COUNT: {source.name!r} produced a {n}-page PDF.\n"
+                f"UNEXPECTED_PAGE_COUNT: {source.name!r} produced a {effective}-page PDF "
+                f"(after trimming chrome).\n"
                 "This script expects every chord sheet to be 1 or 2 pages. Stop and\n"
                 "ask the user how to proceed (trim the source, exclude the song, or\n"
                 "raise the limit).",
@@ -390,11 +457,10 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
             sys.exit(4)
 
     # Lay out and write.
-    for source, pdf, reader in readers:
-        n = len(reader.pages)
+    for source, pdf, reader, effective, trimmed in prepared:
         # Two-page songs must start on an even page (so they fit one spread).
         # Page 1 is alone; the first spread is 2-3.
-        if n == 2 and position % 2 == 1:
+        if effective == 2 and position % 2 == 1:
             first = reader.pages[0]
             writer.add_blank_page(
                 width=first.mediabox.width,
@@ -403,14 +469,16 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
             position += 1
 
         start = position
-        for page in reader.pages:
-            writer.add_page(page)
+        for i in range(effective):
+            writer.add_page(reader.pages[i])
             position += 1
         placements.append(
             SongPlacement(
                 source=source,
                 pdf=pdf,
-                pages=n,
+                pages=effective,
+                raw_pages=effective + trimmed,
+                trimmed=trimmed,
                 binder_start=start,
                 binder_end=position - 1,
             )
@@ -482,7 +550,10 @@ def cmd_build(args: argparse.Namespace) -> int:
     print(f"  {'#':>2}  {'pages':>5}  {'binder':>8}  source")
     for i, p in enumerate(placements, start=1):
         rng = f"{p.binder_start}" if p.binder_start == p.binder_end else f"{p.binder_start}-{p.binder_end}"
-        print(f"  {i:>2}  {p.pages:>5}  {rng:>8}  {p.source.name}")
+        pages_label = f"{p.pages}"
+        if p.trimmed:
+            pages_label = f"{p.pages} (-{p.trimmed})"
+        print(f"  {i:>2}  {pages_label:>5}  {rng:>8}  {p.source.name}")
     return 0
 
 

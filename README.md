@@ -77,6 +77,7 @@ uv run scripts/build_binder.py build \
 - **One-page songs** can land anywhere.
 - **Two-page songs** never cross a spread — if the next available position is odd, a blank page is inserted first so the song falls on a single facing spread.
 - **Setlist order is preserved.** No reordering for efficiency.
+- **Trailing “chrome-only” pages** — source `.doc`/`.docx` files sometimes have a stray trailing paragraph that pushes the header/footer onto a second page with no actual song content. The script detects these (when every line is recurring boilerplate from prior pages and the unique residual is under 5 words) and trims them before layout, with a `⚠ ...trimmed N trailing chrome-only page(s)` warning so it's never silent. The original source isn't modified — only the converted PDF used for the binder.
 - **More than 2 pages?** The script stops and asks. Trim the source or exclude the song.
 
 ## Repo layout

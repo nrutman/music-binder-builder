@@ -49,7 +49,8 @@ Always show the resolved file list to the user before building, even when every 
 - Spreads are pages 2-3, 4-5, 6-7, …
 - A two-page song never crosses a spread; a blank page is inserted before it if needed.
 - Setlist order is preserved.
-- A song with >2 pages aborts with exit code 4 — stop and ask the user.
+- A song with >2 pages (after chrome trimming) aborts with exit code 4 — stop and ask the user.
+- Trailing pages that contain only recurring header/footer chrome (page-number header, song-title line, copyright/CCLI) are auto-trimmed before page counting and merging. A `⚠ ...trimmed N trailing chrome-only page(s)` warning is printed for each affected song. Relay it.
 
 ## File map
 

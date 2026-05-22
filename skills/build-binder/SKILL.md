@@ -121,6 +121,16 @@ The script enforces this — you don't have to:
 - Two-page songs must start on an even page so they occupy a single spread. If the next position is odd, a blank page is inserted first.
 - Setlist order is preserved (the user gave you the order on purpose).
 
+## Trailing-chrome trimming
+
+Many source `.doc`/`.docx` chord sheets have a stray trailing newline that pushes a header/footer-only page onto a second page (no actual song content, just the recurring page-number header, song-title-and-composer line, and copyright/CCLI footer). The build script detects these — when every line on a trailing page (digits and case normalized) also appears on an earlier page and the unique residual is fewer than 5 words, the page is treated as effectively absent.
+
+When this happens you'll see a warning like:
+
+    ⚠ Holy Holy Holy - Chord.doc: trimmed 1 trailing chrome-only page (only header/footer content)
+
+And the layout table shows the effective page count with the trim noted, e.g. `1 (-1)`. Relay both to the user — they should know which sources have stray pages so they can clean them up at the source if they want.
+
 ## Anti-patterns to avoid
 
 - Calling `build` directly without first showing the user the resolved candidates.
