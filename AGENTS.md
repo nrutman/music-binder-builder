@@ -50,7 +50,7 @@ Always show the resolved file list to the user before building, even when every 
 - A two-page song never crosses a spread; a blank page is inserted before it if needed.
 - Setlist order is preserved.
 - A song with >2 pages (after chrome trimming) aborts with exit code 4 — stop and ask the user.
-- Trailing pages that contain only recurring header/footer chrome (page-number header, song-title line, copyright/CCLI) are auto-trimmed before page counting and merging. A `⚠ ...trimmed N trailing chrome-only page(s)` warning is printed for each affected song. Relay it.
+- Trailing pages that contain only recurring header/footer chrome (page-number header, song-title line, copyright/CCLI) are auto-trimmed before page counting and merging. A `⚠ ...trimmed N trailing chrome-only page(s)` warning is printed for each affected song. **Always alert the user explicitly** about trims after a build and recommend they examine the source file — a trim usually means the source has a stray trailing paragraph that should be cleaned up. Never edit the source file yourself; flag it and let the user decide. See the skill's *Trailing-chrome trimming* section for suggested phrasing.
 
 ## File map
 

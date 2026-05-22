@@ -27,6 +27,7 @@ user-invocable: true
 2. **Never auto-resolve capo variants.** If a title matches both "Song.docx" and "Song (Capo 3).docx", the user picks.
 3. **Never proceed past a >2-page song.** Stop and ask the user how to handle it.
 4. **Never leave temp files behind.** The script's `TemporaryDirectory` handles this — don't disable it.
+5. **Always alert the user about trimmed pages.** Trims indicate the source file probably needs cleanup — surface them as actionable items, not just relayed log lines (see [Trailing-chrome trimming](#trailing-chrome-trimming)).
 
 ## Required global dependencies
 
@@ -129,7 +130,17 @@ When this happens you'll see a warning like:
 
     ⚠ Holy Holy Holy - Chord.doc: trimmed 1 trailing chrome-only page (only header/footer content)
 
-And the layout table shows the effective page count with the trim noted, e.g. `1 (-1)`. Relay both to the user — they should know which sources have stray pages so they can clean them up at the source if they want.
+And the layout table shows the effective page count with the trim noted, e.g. `1 (-1)`.
+
+### When you see a trim, alert the user
+
+This is required behavior, not optional. A trim almost always means the source `.doc`/`.docx` has a stray trailing paragraph or page break that should be cleaned up so the file is accurate going forward. After a successful build, if any trims occurred:
+
+1. **Call them out explicitly** in your reply — don't bury them in a log dump. List each affected file by name with the number of pages trimmed.
+2. **Recommend the user examine the source file.** Suggested phrasing:
+   > Heads up: I had to trim 1 trailing blank/chrome-only page from `Holy Holy Holy - Chord.doc`. The page only contained the recurring header/footer (no song content), so the source likely has a stray trailing paragraph or page break. Worth opening in Word or LibreOffice to clean up so future binders use the corrected source.
+3. **Don't try to edit the source file yourself.** These live in the user's Google Drive folder and may be shared/canonical. Flag it and let the user decide.
+4. **If multiple files trim**, list them all — a pattern across many files might point at a shared template that needs fixing.
 
 ## Anti-patterns to avoid
 
