@@ -7,8 +7,17 @@ set -e
 
 ok=true
 
-print_ok()   { printf "  ✓ %-12s %s\n" "$1" "$2"; }
-print_miss() { printf "  ✗ %-12s not found — %s\n" "$1" "$2"; ok=false; }
+# Minimum uv version required for PEP 723 inline script dependencies (the
+# `# /// script` header in build_binder.py). Older `uv` silently ignores the
+# header, runs the script with system Python, and crashes on `import pypdf`.
+MIN_UV="0.4.4"
+
+print_ok()      { printf "  ✓ %-12s %s\n" "$1" "$2"; }
+print_miss()    { printf "  ✗ %-12s not found — %s\n" "$1" "$2"; ok=false; }
+print_too_old() { printf "  ✗ %-12s %s is too old; need >= %s — %s\n" "$1" "$2" "$3" "$4"; ok=false; }
+
+# Returns 0 if $1 >= $2 by version sort.
+version_ge() { printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
 
 echo "Checking music-binder-builder dependencies..."
 echo ""
@@ -16,9 +25,14 @@ echo "Required:"
 
 # --- uv --------------------------------------------------------------------
 if command -v uv &>/dev/null; then
-  print_ok "uv" "$(uv --version 2>&1 | head -1)"
+  uv_version=$(uv --version 2>&1 | awk '{print $2}')
+  if version_ge "$uv_version" "$MIN_UV"; then
+    print_ok "uv" "$uv_version (>= $MIN_UV)"
+  else
+    print_too_old "uv" "$uv_version" "$MIN_UV" "brew upgrade uv"
+  fi
 else
-  print_miss "uv" "brew install uv"
+  print_miss "uv" "brew install uv  (need >= $MIN_UV for PEP 723 inline deps)"
 fi
 
 # --- LibreOffice -----------------------------------------------------------

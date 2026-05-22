@@ -50,7 +50,23 @@ from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from pypdf import PdfReader, PdfWriter
+try:
+    from pypdf import PdfReader, PdfWriter
+except ModuleNotFoundError as e:
+    if e.name == "pypdf":
+        sys.stderr.write(
+            "MISSING_DEPENDENCY: pypdf was not installed automatically.\n"
+            "\n"
+            "This usually means your `uv` is too old to read PEP 723 inline script\n"
+            "dependencies (need uv >= 0.4.4). Check and upgrade:\n"
+            "\n"
+            "    uv --version\n"
+            "    brew upgrade uv\n"
+            "\n"
+            "Then re-run. (Also run `bash scripts/check_deps.sh` to verify.)\n"
+        )
+        sys.exit(3)
+    raise
 
 
 # ---------------------------------------------------------------------------
