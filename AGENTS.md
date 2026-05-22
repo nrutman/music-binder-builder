@@ -60,7 +60,7 @@ Always two phases, in order. Same contract for both modes — only the subcomman
 1. **Resolve** — `uv run scripts/build_binder.py pco-resolve --date YYYY-MM-DD […]`. The script picks chord-named attachments where it can; songs with 0 or 2+ chord-named `.doc`/`.docx` attachments exit with `PCO_AMBIGUOUS_ATTACHMENT`. Resolve those by asking the user, then re-run with `--pick SONG_ID=ATTACHMENT_ID`.
 2. **Build** — `uv run scripts/build_binder.py pco-build --date YYYY-MM-DD […] [--name "…"]` with the same flags as the successful resolve. Downloads attachments and runs the same conversion/merge pipeline.
 
-Always show the resolved song list to the user before building, even when every song resolves automatically. The script never builds without an explicit `*-build` call.
+Always include the resolved song list in your reply so the user can spot-check. **Block on confirmation only when there's an actual decision to make** — multiple candidates, no candidates, low-confidence matches, or a `PCO_AMBIGUOUS_*` exit. When every song resolves cleanly (one high-confidence candidate each, no ambiguity), go straight to the build. See the skill's *Confirmation policy* section for the full rule.
 
 ## Layout guarantees (enforced by the script)
 

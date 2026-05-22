@@ -26,11 +26,30 @@ user-invocable: true
 
 ## Iron rules
 
-1. **Never guess a song match.** Always run `resolve` first and show the user every candidate file for every title (including single-candidate matches). Wait for explicit confirmation before running `build`.
-2. **Never auto-resolve capo variants.** If a title matches both "Song.docx" and "Song (Capo 3).docx", the user picks.
+1. **Never guess a song match.** Always run `resolve` / `pco-resolve` first. Show every candidate to the user **whenever there's a decision to make** — see the [Confirmation policy](#confirmation-policy) below.
+2. **Never auto-resolve capo variants.** If a title matches both `Song.docx` and `Song (Capo 3).docx` (local), or a song's Key has both `Song - Chord.docx` and `Song - Chord Capo.docx` (PCO), the user picks.
 3. **Never proceed past a >2-page song.** Stop and ask the user how to handle it.
 4. **Never leave temp files behind.** The script's `TemporaryDirectory` handles this — don't disable it.
 5. **Always alert the user about trimmed pages.** Trims indicate the source file probably needs cleanup — surface them as actionable items, not just relayed log lines (see [Trailing-chrome trimming](#trailing-chrome-trimming)).
+
+## Confirmation policy
+
+Confirmation is required only when there's an actual decision to make. If the resolve step is unambiguous — every song has exactly one auto-picked candidate — you can go straight to the build. Always show the resolved list in your reply either way; just don't *block* on confirmation when nothing's in doubt.
+
+**Confirm before building when any of these are true:**
+- Any title has 2+ candidate files (local) or 2+ chord-named attachments (PCO).
+- Any title has 0 candidates (local: no fuzzy match above threshold; PCO: no chord-named attachments on the Key / Arrangement / Song).
+- Any title's match looks suspicious — a low fuzzy score, an unexpected song title ("that doesn't sound like a song the user would pick"), or a filename that suggests the wrong version.
+- The user explicitly asked you to confirm first ("show me the list before you build").
+- `pco-resolve` exits with `PCO_AMBIGUOUS_SERVICE_TYPE` or `PCO_AMBIGUOUS_PLAN`.
+
+**Skip confirmation and build directly when all of these are true:**
+- Every song resolved to exactly one candidate.
+- For local mode: every fuzzy match scored ≥ 0.90 (one clearly-correct file).
+- For PCO mode: every song's chord file was auto-picked (`auto`, not `user pick`), no `PCO_AMBIGUOUS_*` exit.
+- Nothing in the resolved list looks suspicious.
+
+When you skip confirmation, still include the resolved table in your reply so the user can spot-check after the fact.
 
 ## Required global dependencies
 
@@ -76,7 +95,7 @@ Don't write to `.env` — that file documents defaults for the repo, not the use
 
 ## Workflow — Local mode
 
-Use when the user supplies song titles. Always follow this exact sequence:
+Use when the user supplies song titles.
 
 ### 1. Verify dependencies (first use in a session)
 
@@ -94,18 +113,15 @@ uv run scripts/build_binder.py resolve "Title 1" "Title 2" "Title 3"
 
 This produces a list of candidate files for each title with similarity scores. The script **never picks for you**.
 
-### 3. Present candidates to the user
+### 3. Apply the confirmation policy
 
-Show every title with its candidate files. Explicitly call out:
-- Titles with multiple candidates (especially capo variants like "Song (Capo 3).docx") — ask the user which to use.
-- Titles with no candidates above the threshold — show the top suggestions and ask the user to either rename their request or point at the right file directly.
-- Even titles with a single candidate — confirm before proceeding.
-
-**Wait for explicit confirmation** of the full file list before continuing. Do not proceed past this step on your own.
+Apply [Confirmation policy](#confirmation-policy):
+- If every title has exactly one high-confidence candidate (≥ 0.90), skip confirmation and proceed to build. Include the resolved table in your reply.
+- If any title has multiple candidates, no candidates, or a low-confidence match, present the list to the user and wait for their pick.
 
 ### 4. Build the binder
 
-Once the user has confirmed the file list and (optionally) a binder name:
+With the resolved file list (and optionally a binder name):
 
 ```bash
 uv run scripts/build_binder.py build \
@@ -159,9 +175,12 @@ If PCO mode is misbehaving, run `uv run scripts/build_binder.py pco-doctor` for 
   ```
   `SONG_ID` and `ATTACHMENT_ID` are both shown in the resolve output. Keep accumulating picks until `pco-resolve` exits 0.
 
-### 4. Confirm the full song list with the user
+### 4. Apply the confirmation policy
 
-Even when `pco-resolve` exits 0 with no ambiguities, **always show the resolved list to the user and wait for confirmation** before building. Same iron rule as local mode.
+Apply [Confirmation policy](#confirmation-policy):
+- If `pco-resolve` exited 0 and every song was `auto`-picked from its Key, skip confirmation and proceed to build. Include the resolved table in your reply.
+- If you needed any `--pick` to disambiguate (capo variants, Chord vs Chord Capo, etc.), the user has already made those decisions, but still show the final list and wait for their go-ahead before building — because the picks themselves are the decision point.
+- If anything in the resolved list looks suspicious (wrong-looking title, missing song, etc.), confirm before building.
 
 ### 5. Build the binder
 
