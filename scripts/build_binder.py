@@ -105,6 +105,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Config loading
 # ---------------------------------------------------------------------------
 
+
 def load_env_file(path: Path) -> dict[str, str]:
     """Parse a simple KEY=VALUE env file. Ignores comments and blank lines.
     Strips matching surrounding quotes. Empty values count as unset."""
@@ -165,7 +166,9 @@ def load_config() -> Config:
         invalid.append(f"OUTPUT_DIR={output_dir} (does not exist or not a directory)")
 
     if invalid:
-        print("MISSING_CONFIG: one or more required paths in .env.local are invalid:", file=sys.stderr)
+        print(
+            "MISSING_CONFIG: one or more required paths in .env.local are invalid:", file=sys.stderr
+        )
         for item in invalid:
             print(f"  - {item}", file=sys.stderr)
         print("\nFix the values in .env.local and try again.", file=sys.stderr)
@@ -177,7 +180,10 @@ def load_config() -> Config:
     try:
         threshold = float(threshold_raw)
     except ValueError:
-        print(f"MISSING_CONFIG: FUZZY_MATCH_THRESHOLD must be a number, got '{threshold_raw}'.", file=sys.stderr)
+        print(
+            f"MISSING_CONFIG: FUZZY_MATCH_THRESHOLD must be a number, got '{threshold_raw}'.",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     return Config(
@@ -189,7 +195,10 @@ def load_config() -> Config:
 
 
 def die_missing_config(missing: list[str]) -> None:
-    print("MISSING_CONFIG: the following required parameters are not set in .env.local:", file=sys.stderr)
+    print(
+        "MISSING_CONFIG: the following required parameters are not set in .env.local:",
+        file=sys.stderr,
+    )
     for key in missing:
         print(f"  - {key}", file=sys.stderr)
     print(
@@ -207,6 +216,7 @@ def die_missing_config(missing: list[str]) -> None:
 # ---------------------------------------------------------------------------
 # Dependency checks
 # ---------------------------------------------------------------------------
+
 
 def resolve_soffice(configured: str) -> Path:
     """Find LibreOffice's soffice binary. Order: configured path → macOS app
@@ -240,6 +250,7 @@ def resolve_soffice(configured: str) -> Path:
 # ---------------------------------------------------------------------------
 # Fuzzy matching
 # ---------------------------------------------------------------------------
+
 
 def normalize(s: str) -> str:
     """Lowercase, strip extension, replace punctuation with spaces, collapse
@@ -304,6 +315,7 @@ def match_title(query: str, files: list[Path], threshold: float) -> MatchResult:
 # `resolve` subcommand
 # ---------------------------------------------------------------------------
 
+
 def cmd_resolve(args: argparse.Namespace) -> int:
     config = load_config()
     titles: list[str] = args.titles
@@ -334,7 +346,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         else:
             print(f"      (none above threshold {config.fuzzy_threshold})")
         if not result.candidates and result.suggestions:
-            print(f"    Top suggestions (below threshold):")
+            print("    Top suggestions (below threshold):")
             for path, score in result.suggestions:
                 print(f"      {score:.2f}  {path}")
         print()
@@ -343,7 +355,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         "Next step: confirm the file list with the user (always — even when there's\n"
         "only one candidate per title), then run:\n"
         "\n"
-        "    uv run scripts/build_binder.py build [--name \"...\"] FILE [FILE ...]\n"
+        '    uv run scripts/build_binder.py build [--name "..."] FILE [FILE ...]\n'
     )
     return 0
 
@@ -352,6 +364,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 # PDF conversion + layout
 # ---------------------------------------------------------------------------
 
+
 def convert_to_pdf(src: Path, out_dir: Path, soffice: Path) -> Path:
     """Convert a .doc/.docx to PDF via headless LibreOffice. Returns the
     resulting PDF path. Raises RuntimeError on failure."""
@@ -359,8 +372,10 @@ def convert_to_pdf(src: Path, out_dir: Path, soffice: Path) -> Path:
         [
             str(soffice),
             "--headless",
-            "--convert-to", "pdf",
-            "--outdir", str(out_dir),
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(out_dir),
             str(src),
         ],
         capture_output=True,
@@ -376,15 +391,48 @@ def convert_to_pdf(src: Path, out_dir: Path, soffice: Path) -> Path:
     return pdf
 
 
+@dataclass(frozen=True)
+class LayoutEntry:
+    """Where one song lands in the binder (pure layout math, no PDF state)."""
+
+    blank_before: bool  # True if a blank page was inserted before this song
+    binder_start: int  # 1-indexed page in the binder
+    binder_end: int  # 1-indexed inclusive
+
+
+def plan_layout(effective_page_counts: list[int]) -> list[LayoutEntry]:
+    """Pure layout calculation. Given per-song *effective* page counts (each
+    must be 1 or 2 — callers validate first), return a placement entry per
+    song in setlist order.
+
+    Rules:
+      - page 1 is alone
+      - spreads are 2-3, 4-5, 6-7, …
+      - a 2-page song that would land at an odd position gets a blank page
+        inserted before it so it occupies a single spread
+      - song order is preserved
+    """
+    position = 1
+    entries: list[LayoutEntry] = []
+    for pages in effective_page_counts:
+        blank = pages == 2 and position % 2 == 1
+        if blank:
+            position += 1
+        start = position
+        position += pages
+        entries.append(LayoutEntry(blank_before=blank, binder_start=start, binder_end=position - 1))
+    return entries
+
+
 @dataclass
 class SongPlacement:
     source: Path
     pdf: Path
-    pages: int           # effective page count after trimming
-    raw_pages: int       # original page count from conversion
-    trimmed: int         # how many trailing chrome-only pages were dropped
-    binder_start: int    # 1-indexed page in the final binder
-    binder_end: int      # 1-indexed inclusive
+    pages: int  # effective page count after trimming
+    raw_pages: int  # original page count from conversion
+    trimmed: int  # how many trailing chrome-only pages were dropped
+    binder_start: int  # 1-indexed page in the final binder
+    binder_end: int  # 1-indexed inclusive
 
 
 _TRIM_MIN_UNIQUE_WORDS = 5
@@ -448,7 +496,6 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
     in setlist order. Returns per-song placement info."""
     writer = PdfWriter()
     placements: list[SongPlacement] = []
-    position = 1  # 1-indexed page counter for the final binder
 
     # Open all readers up front so we can fail fast on a corrupt PDF, and
     # compute effective page counts (after trimming trailing chrome-only
@@ -481,22 +528,19 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
             )
             sys.exit(4)
 
-    # Lay out and write.
-    for source, pdf, reader, effective, trimmed in prepared:
-        # Two-page songs must start on an even page (so they fit one spread).
-        # Page 1 is alone; the first spread is 2-3.
-        if effective == 2 and position % 2 == 1:
+    # Compute the placement up front using the pure layout helper, then walk
+    # the prepared list to actually write pages + blanks. Keeping the math
+    # and the writing separate makes plan_layout unit-testable.
+    layout = plan_layout([eff for _src, _pdf, _r, eff, _t in prepared])
+    for entry, (source, pdf, reader, effective, trimmed) in zip(layout, prepared, strict=True):
+        if entry.blank_before:
             first = reader.pages[0]
             writer.add_blank_page(
                 width=first.mediabox.width,
                 height=first.mediabox.height,
             )
-            position += 1
-
-        start = position
         for i in range(effective):
             writer.add_page(reader.pages[i])
-            position += 1
         placements.append(
             SongPlacement(
                 source=source,
@@ -504,8 +548,8 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
                 pages=effective,
                 raw_pages=effective + trimmed,
                 trimmed=trimmed,
-                binder_start=start,
-                binder_end=position - 1,
+                binder_start=entry.binder_start,
+                binder_end=entry.binder_end,
             )
         )
 
@@ -518,6 +562,7 @@ def merge_into_binder(song_pdfs: list[tuple[Path, Path]], out_path: Path) -> lis
 # ---------------------------------------------------------------------------
 # `build` subcommand
 # ---------------------------------------------------------------------------
+
 
 def run_build_pipeline(
     files: list[Path],
@@ -561,7 +606,11 @@ def run_build_pipeline(
     print("Layout:")
     print(f"  {'#':>2}  {'pages':>5}  {'binder':>8}  source")
     for i, p in enumerate(placements, start=1):
-        rng = f"{p.binder_start}" if p.binder_start == p.binder_end else f"{p.binder_start}-{p.binder_end}"
+        rng = (
+            f"{p.binder_start}"
+            if p.binder_start == p.binder_end
+            else f"{p.binder_start}-{p.binder_end}"
+        )
         pages_label = f"{p.pages}"
         if p.trimmed:
             pages_label = f"{p.pages} (-{p.trimmed})"
@@ -657,9 +706,7 @@ def _print_pco_resolutions(
             all_resolved = False
             if r.chord_candidates:
                 src = f" on {r.chord_source}" if getattr(r, "chord_source", None) else ""
-                print(
-                    f"      ⚠ {len(r.chord_candidates)} chord-named attachments{src} — pick one:"
-                )
+                print(f"      ⚠ {len(r.chord_candidates)} chord-named attachments{src} — pick one:")
                 for a in r.chord_candidates:
                     fname = a["attributes"].get("filename") or "(no filename)"
                     print(f"          attachment_id={a['id']}  {fname}")
@@ -669,7 +716,9 @@ def _print_pco_resolutions(
                 )
                 for a in r.doc_candidates:
                     fname = a["attributes"].get("filename") or "(no filename)"
-                    attachable = (a.get("relationships") or {}).get("attachable", {}).get("data") or {}
+                    attachable = (a.get("relationships") or {}).get("attachable", {}).get(
+                        "data"
+                    ) or {}
                     where = f"{attachable.get('type')}:{attachable.get('id')}"
                     print(f"          attachment_id={a['id']}  {fname}  ({where})")
             else:
@@ -702,17 +751,15 @@ def _pco_resolve_plan(
     service_type_name = st["attributes"]["name"]
 
     if args.plan_id:
-        plan = pco_client.get(
-            f"/services/v2/service_types/{service_type_id}/plans/{args.plan_id}"
-        )["data"]
+        plan = pco_client.get(f"/services/v2/service_types/{service_type_id}/plans/{args.plan_id}")[
+            "data"
+        ]
     else:
         target_date = _parse_iso_date(args.date)
         plan = pcomod.find_plan_for_date(pco_client, service_type_id, target_date)
 
     picks = _parse_picks(args.pick)
-    resolutions = pcomod.resolve_plan_songs(
-        pco_client, service_type_id, plan["id"], picks
-    )
+    resolutions = pcomod.resolve_plan_songs(pco_client, service_type_id, plan["id"], picks)
     return plan, service_type_id, service_type_name, resolutions
 
 
@@ -736,7 +783,7 @@ def cmd_pco_resolve(args: argparse.Namespace) -> int:
         return 6
 
     print("Next step: confirm the list with the user, then run pco-build with the same")
-    print("arguments plus --name \"...\" to produce the binder.")
+    print('arguments plus --name "..." to produce the binder.')
     return 0
 
 
@@ -794,7 +841,9 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
         else:
             st = active_types[0]
         st_id = st["id"]
-        print(f"\nUsing service type id={st_id} name={st['attributes'].get('name')!r} for further checks")
+        print(
+            f"\nUsing service type id={st_id} name={st['attributes'].get('name')!r} for further checks"
+        )
 
         # Step 2: plans listing for this service type. Past plans only —
         # future plans in this org are auto-templated with no songs filled in
@@ -819,7 +868,11 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
         if not plans:
             print("\n⚠ no past plans for this service type; further shape checks skipped.")
             return 6 if issues else 0
-        check("plan[0] has 'sort_date'", "sort_date" in plans[0]["attributes"], "needed for date-based plan lookup")
+        check(
+            "plan[0] has 'sort_date'",
+            "sort_date" in plans[0]["attributes"],
+            "needed for date-based plan lookup",
+        )
         check(
             "sort_date starts with YYYY-MM-DD",
             bool(re.match(r"^\d{4}-\d{2}-\d{2}", plans[0]["attributes"].get("sort_date") or "")),
@@ -850,7 +903,9 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
                 included = pl.get("included") or []
                 break
         if chosen is None:
-            print("\n⚠ none of the recent past plans contain song items; further shape checks skipped.")
+            print(
+                "\n⚠ none of the recent past plans contain song items; further shape checks skipped."
+            )
             return 6 if issues else 0
         plan_id = chosen["id"]
         print(
@@ -858,7 +913,9 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
         )
         songs_inc = [i for i in included if i.get("type") == "Song"]
         song_items = [it for it in items if it["attributes"].get("item_type") == "song"]
-        print(f"  ✓ HTTP 200, {len(items)} item(s), {len(songs_inc)} included Song(s), {len(song_items)} song item(s)")
+        print(
+            f"  ✓ HTTP 200, {len(items)} item(s), {len(songs_inc)} included Song(s), {len(song_items)} song item(s)"
+        )
         for it in song_items[:5]:
             attrs = it["attributes"]
             song_rel = (it.get("relationships") or {}).get("song", {}).get("data")
@@ -867,8 +924,14 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
                 f"title={attrs.get('title')!r}  song_id={song_rel and song_rel.get('id')}"
             )
         check("response['included'] is a list", isinstance(payload.get("included"), list))
-        check("every item has attributes.item_type", all("item_type" in it["attributes"] for it in items))
-        check("every item has attributes.sequence", all("sequence" in it["attributes"] for it in items))
+        check(
+            "every item has attributes.item_type",
+            all("item_type" in it["attributes"] for it in items),
+        )
+        check(
+            "every item has attributes.sequence",
+            all("sequence" in it["attributes"] for it in items),
+        )
         check(
             "every song item has relationships.song.data",
             all((it.get("relationships") or {}).get("song", {}).get("data") for it in song_items),
@@ -954,7 +1017,11 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
             print(f"    /songs/{sid}/arrangements: {len(arrangements)} arrangement(s)")
             for arr in arrangements:
                 arr_id = arr["id"]
-                arr_name = arr["attributes"].get("name") or arr["attributes"].get("print_margin") or "(unnamed)"
+                arr_name = (
+                    arr["attributes"].get("name")
+                    or arr["attributes"].get("print_margin")
+                    or "(unnamed)"
+                )
                 print(f"      arrangement_id={arr_id}  name={arr_name!r}")
                 try:
                     arr_atts_payload = client.get(
@@ -970,9 +1037,7 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
                     chords = [a for a in arr_atts if pcomod.is_chord_doc_attachment(a)]
                     if chords:
                         sample_att = chords[0]
-                        sample_att_parent_path = (
-                            f"/services/v2/songs/{sid}/arrangements/{arr_id}"
-                        )
+                        sample_att_parent_path = f"/services/v2/songs/{sid}/arrangements/{arr_id}"
 
             # selected_attachment on this plan's Item
             try:
@@ -1020,9 +1085,7 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
                         chords = [a for a in key_atts if pcomod.is_chord_doc_attachment(a)]
                         if chords:
                             sample_att = chords[0]
-                            sample_att_parent_path = (
-                                f"/services/v2/songs/{sid}/arrangements/{arr_id_for_key}/keys/{key_id}"
-                            )
+                            sample_att_parent_path = f"/services/v2/songs/{sid}/arrangements/{arr_id_for_key}/keys/{key_id}"
             else:
                 print(f"    items/{item_id}/key: (none)")
 
@@ -1039,13 +1102,9 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
                 "locations; open-action check skipped."
             )
         else:
-            print(
-                f"\nStep 5: POST {sample_att_parent_path}/attachments/{sample_att['id']}/open"
-            )
+            print(f"\nStep 5: POST {sample_att_parent_path}/attachments/{sample_att['id']}/open")
             try:
-                resp = client.post(
-                    f"{sample_att_parent_path}/attachments/{sample_att['id']}/open"
-                )
+                resp = client.post(f"{sample_att_parent_path}/attachments/{sample_att['id']}/open")
             except pcomod.PCOError as e:
                 print(f"  ✗ request failed: {e}")
                 return 6
@@ -1053,9 +1112,13 @@ def cmd_pco_doctor(args: argparse.Namespace) -> int:
             attrs = data.get("attributes") or {}
             url = attrs.get("attachment_url") or ""
             host = re.sub(r"^https?://([^/?#]+).*", r"\1", url) if url else ""
-            print(f"  ✓ HTTP 200, AttachmentActivity received")
+            print("  ✓ HTTP 200, AttachmentActivity received")
             check("data.attributes.attachment_url is present", bool(url), "needed for download")
-            check("attachment_url uses https://", url.startswith("https://"), "signed CDN URL expected")
+            check(
+                "attachment_url uses https://",
+                url.startswith("https://"),
+                "signed CDN URL expected",
+            )
             if host:
                 print(f"      attachment_url host: {host}")
 
@@ -1104,6 +1167,7 @@ def cmd_pco_build(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # argparse
 # ---------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(

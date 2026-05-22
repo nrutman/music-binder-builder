@@ -13,10 +13,11 @@ header of build_binder.py and installed automatically by `uv` on first run.
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 try:
     import httpx
@@ -65,9 +66,7 @@ def load_pco_config(env: dict[str, str]) -> PCOConfig:
     if not secret:
         missing.append("PCO_SECRET")
     if missing:
-        sys.stderr.write(
-            "MISSING_CONFIG: Planning Center credentials are not set in .env.local:\n"
-        )
+        sys.stderr.write("MISSING_CONFIG: Planning Center credentials are not set in .env.local:\n")
         for k in missing:
             sys.stderr.write(f"  - {k}\n")
         sys.stderr.write(
@@ -398,14 +397,18 @@ class SongResolution:
     song_id: str
     song_title: str
     item_title: str
-    arrangement_id: str | None              # the item's selected arrangement, if any
-    key_id: str | None                       # the item's selected key, if any
-    chord_candidates: list[dict[str, Any]]  # chord-named .doc/.docx attachments found at the best level
-    chord_source: str | None                 # "Key" | "Arrangement" | "Song" — where chord_candidates were found
-    doc_candidates: list[dict[str, Any]]    # all .doc/.docx across Song/Arr/Key (for the 0-chord fallback display)
-    picked: dict[str, Any] | None           # the chosen attachment, or None if ambiguous
-    pick_source: str | None                 # "auto" | "pick" | None
-    picked_parent_path: str | None          # parent URL path for the picked attachment's /open action
+    arrangement_id: str | None  # the item's selected arrangement, if any
+    key_id: str | None  # the item's selected key, if any
+    chord_candidates: list[
+        dict[str, Any]
+    ]  # chord-named .doc/.docx attachments found at the best level
+    chord_source: str | None  # "Key" | "Arrangement" | "Song" — where chord_candidates were found
+    doc_candidates: list[
+        dict[str, Any]
+    ]  # all .doc/.docx across Song/Arr/Key (for the 0-chord fallback display)
+    picked: dict[str, Any] | None  # the chosen attachment, or None if ambiguous
+    pick_source: str | None  # "auto" | "pick" | None
+    picked_parent_path: str | None  # parent URL path for the picked attachment's /open action
 
 
 def _attachable_parent_path(
@@ -494,11 +497,7 @@ def resolve_plan_songs(
                 chord_source = level_name
                 break
 
-        all_docs = [
-            a
-            for a in (key_atts + arr_atts + song_atts)
-            if is_doc_attachment(a)
-        ]
+        all_docs = [a for a in (key_atts + arr_atts + song_atts) if is_doc_attachment(a)]
         # De-duplicate by id while preserving order.
         seen_ids: set[str] = set()
         doc_candidates: list[dict[str, Any]] = []

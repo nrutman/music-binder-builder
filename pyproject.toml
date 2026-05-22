@@ -1,0 +1,58 @@
+[project]
+name = "music-binder-builder"
+version = "0.0.0"
+description = "Build PDF binders of chord sheets from local files or Planning Center service plans."
+requires-python = ">=3.10"
+# Runtime dependencies are declared per-script via PEP 723 inline metadata in
+# scripts/build_binder.py (uv installs them automatically on first run). This
+# file exists for test/lint tooling only.
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pypdf>=4.0",
+    "httpx>=0.27",
+    "python-docx>=1.1",
+    "ruff>=0.6",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff (formatter + linter)
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["generated", ".cache"]
+
+[tool.ruff.lint]
+# Keep this list deliberately small. The goal is "catches real bugs", not
+# "maximum strictness".
+#   E, W  — pycodestyle (errors + warnings)
+#   F     — pyflakes (unused imports, undefined names, etc.)
+#   I     — isort (import ordering)
+#   UP    — pyupgrade (syntax modernization for the target Python)
+#   B     — flake8-bugbear (common gotchas)
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    # Don't force splitting long error messages into multi-line strings — the
+    # MISSING_CONFIG / MISSING_DEPENDENCY messages are intentionally long and
+    # rewrapping them hurts readability.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can have longer/uglier code in the name of clarity.
+"tests/*" = ["E501", "B018"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests that require LibreOffice (`soffice`) on the host",
+]
+# Quiet plugin autoload; we don't use any.
+addopts = "-ra"
