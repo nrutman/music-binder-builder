@@ -100,7 +100,9 @@ uv run scripts/build_binder.py pco-build --date 2026-05-24 \
   --pick 12345=67890
 ```
 
-`SONG_ID` and `ATTACHMENT_ID` are both shown in the `pco-resolve` output.
+`SONG_ID` and `ATTACHMENT_ID` are both shown in the `pco-resolve` output. There's also a `pco-doctor` subcommand for a read-only connectivity + shape diagnostic (`uv run scripts/build_binder.py pco-doctor`).
+
+**Where PCO chord charts live**: in this app's experience, chord charts are attached to the **Key** that a song is set in for a given plan (so that different keys can have different chord charts — e.g. `Song - Chord.docx` plus `Song - Chord Capo.docx` on the same Key). Lyric sheets are attached to **Arrangements**. The resolver follows that priority: Key first, then Arrangement, then Song-level.
 
 ## How the layout works
 

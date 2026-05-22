@@ -641,29 +641,39 @@ def _print_pco_resolutions(
     print()
     all_resolved = True
     for r in resolutions:
-        print(f"[{r.sequence}] {r.song_title}  (song_id={r.song_id})")
+        scope_bits = []
+        if getattr(r, "arrangement_id", None):
+            scope_bits.append(f"arrangement={r.arrangement_id}")
+        if getattr(r, "key_id", None):
+            scope_bits.append(f"key={r.key_id}")
+        scope = ("  [" + ", ".join(scope_bits) + "]") if scope_bits else ""
+        print(f"[{r.sequence}] {r.song_title}  (song_id={r.song_id}){scope}")
         if r.picked:
             tag = "auto" if r.pick_source == "auto" else "user pick"
+            src = f", from {r.chord_source}" if getattr(r, "chord_source", None) else ""
             f = r.picked["attributes"].get("filename") or "(no filename)"
-            print(f"      ✓ {f}  (attachment_id={r.picked['id']}, {tag})")
+            print(f"      ✓ {f}  (attachment_id={r.picked['id']}, {tag}{src})")
         else:
             all_resolved = False
             if r.chord_candidates:
+                src = f" on {r.chord_source}" if getattr(r, "chord_source", None) else ""
                 print(
-                    f"      ⚠ {len(r.chord_candidates)} chord-named attachments — pick one:"
+                    f"      ⚠ {len(r.chord_candidates)} chord-named attachments{src} — pick one:"
                 )
                 for a in r.chord_candidates:
                     fname = a["attributes"].get("filename") or "(no filename)"
                     print(f"          attachment_id={a['id']}  {fname}")
             elif r.doc_candidates:
                 print(
-                    f"      ⚠ no chord-named attachments. Other .doc/.docx on this song:"
+                    "      ⚠ no chord-named attachments. Other .doc/.docx anywhere on this song/arrangement/key:"
                 )
                 for a in r.doc_candidates:
                     fname = a["attributes"].get("filename") or "(no filename)"
-                    print(f"          attachment_id={a['id']}  {fname}")
+                    attachable = (a.get("relationships") or {}).get("attachable", {}).get("data") or {}
+                    where = f"{attachable.get('type')}:{attachable.get('id')}"
+                    print(f"          attachment_id={a['id']}  {fname}  ({where})")
             else:
-                print("      ⚠ no .doc/.docx attachments at all on this song.")
+                print("      ⚠ no .doc/.docx attachments anywhere on this song/arrangement/key.")
         print()
     return all_resolved
 
@@ -716,6 +726,7 @@ def cmd_pco_resolve(args: argparse.Namespace) -> int:
         plan, _stid, st_name, resolutions = _pco_resolve_plan(client, args)
         all_resolved = _print_pco_resolutions(resolutions, plan, st_name)
 
+    sys.stdout.flush()
     if not all_resolved:
         sys.stderr.write(
             "\nPCO_AMBIGUOUS_ATTACHMENT: some songs need disambiguation. Show the\n"
@@ -729,6 +740,335 @@ def cmd_pco_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pco_doctor(args: argparse.Namespace) -> int:
+    """Connectivity + shape diagnostic. Walks the same path the resolver uses
+    (service types → plans → items → song attachments → open action) and
+    prints structural info only — never credentials. Use to validate that
+    a freshly-configured `.env.local` works and that the API responses
+    match what this codebase expects."""
+    config = load_config()
+    _ = config
+    import pco as pcomod
+
+    issues: list[str] = []
+
+    def check(label: str, ok: bool, hint: str = "") -> None:
+        if ok:
+            print(f"  ✓ {label}")
+        else:
+            print(f"  ✗ {label}" + (f" — {hint}" if hint else ""))
+            issues.append(label)
+
+    pco_config = pcomod.load_pco_config(_pco_load_env())
+    print("PCO doctor — verifying API connectivity and resource shapes\n")
+
+    with pcomod.PCOClient(pco_config) as client:
+        # Step 1: service types (smallest endpoint, confirms auth)
+        print("Step 1: GET /services/v2/service_types")
+        try:
+            payload = client.get("/services/v2/service_types", params={"per_page": 25})
+        except pcomod.PCOError as e:
+            print(f"  ✗ request failed: {e}")
+            return 6
+        types = payload.get("data") or []
+        print(f"  ✓ HTTP 200, {len(types)} service type(s) returned")
+        check("response['data'] is a list", isinstance(payload.get("data"), list))
+        for t in types:
+            attrs = t.get("attributes", {})
+            archived = " [archived]" if attrs.get("archived_at") else ""
+            print(f"      id={t['id']}  name={attrs.get('name')!r}{archived}")
+        active_types = [t for t in types if not t["attributes"].get("archived_at")]
+        if not active_types:
+            print("\n⚠ no active service types in this org; further shape checks skipped.")
+            return 6 if issues else 0
+
+        # If the user has set a default service type, use it; otherwise pick the first active one.
+        if pco_config.default_service_type_id:
+            st_match = [t for t in active_types if t["id"] == pco_config.default_service_type_id]
+            st = st_match[0] if st_match else active_types[0]
+            if not st_match:
+                print(
+                    f"  ⚠ PCO_DEFAULT_SERVICE_TYPE_ID={pco_config.default_service_type_id} "
+                    "not found among active types; falling back to first active."
+                )
+        else:
+            st = active_types[0]
+        st_id = st["id"]
+        print(f"\nUsing service type id={st_id} name={st['attributes'].get('name')!r} for further checks")
+
+        # Step 2: plans listing for this service type. Past plans only —
+        # future plans in this org are auto-templated with no songs filled in
+        # yet, so checking past ones is more reliable for shape verification.
+        print(f"\nStep 2: GET /services/v2/service_types/{st_id}/plans  (5 most recent PAST plans)")
+        try:
+            payload = client.get(
+                f"/services/v2/service_types/{st_id}/plans",
+                params={"order": "-sort_date", "per_page": 5, "filter": "past"},
+            )
+        except pcomod.PCOError as e:
+            print(f"  ✗ request failed: {e}")
+            return 6
+        plans = payload.get("data") or []
+        print(f"  ✓ HTTP 200, {len(plans)} plan(s) returned")
+        for p in plans:
+            attrs = p.get("attributes", {})
+            print(
+                f"      id={p['id']}  sort_date={attrs.get('sort_date')!r}  "
+                f"items_count={attrs.get('items_count')}  title={attrs.get('title')!r}"
+            )
+        if not plans:
+            print("\n⚠ no past plans for this service type; further shape checks skipped.")
+            return 6 if issues else 0
+        check("plan[0] has 'sort_date'", "sort_date" in plans[0]["attributes"], "needed for date-based plan lookup")
+        check(
+            "sort_date starts with YYYY-MM-DD",
+            bool(re.match(r"^\d{4}-\d{2}-\d{2}", plans[0]["attributes"].get("sort_date") or "")),
+            "client-side date match assumes leading ISO date",
+        )
+        check("pagination 'links' object present", isinstance(payload.get("links"), dict))
+
+        # Step 3: scan plans (most recent first) for one that actually has
+        # song items. items_count includes headers/media too, so we have to
+        # fetch items to know for sure.
+        chosen = None
+        items = []
+        included = []
+        for candidate in plans:
+            cid = candidate["id"]
+            try:
+                pl = client.get(
+                    f"/services/v2/service_types/{st_id}/plans/{cid}/items",
+                    params={"include": "song", "order": "sequence", "per_page": 100},
+                )
+            except pcomod.PCOError as e:
+                print(f"  ✗ items fetch for plan {cid} failed: {e}")
+                return 6
+            cand_items = pl.get("data") or []
+            if any(it["attributes"].get("item_type") == "song" for it in cand_items):
+                chosen = candidate
+                items = cand_items
+                included = pl.get("included") or []
+                break
+        if chosen is None:
+            print("\n⚠ none of the recent past plans contain song items; further shape checks skipped.")
+            return 6 if issues else 0
+        plan_id = chosen["id"]
+        print(
+            f"\nStep 3: GET /services/v2/service_types/{st_id}/plans/{plan_id}/items?include=song&order=sequence"
+        )
+        songs_inc = [i for i in included if i.get("type") == "Song"]
+        song_items = [it for it in items if it["attributes"].get("item_type") == "song"]
+        print(f"  ✓ HTTP 200, {len(items)} item(s), {len(songs_inc)} included Song(s), {len(song_items)} song item(s)")
+        for it in song_items[:5]:
+            attrs = it["attributes"]
+            song_rel = (it.get("relationships") or {}).get("song", {}).get("data")
+            print(
+                f"      item_id={it['id']}  seq={attrs.get('sequence')}  "
+                f"title={attrs.get('title')!r}  song_id={song_rel and song_rel.get('id')}"
+            )
+        check("response['included'] is a list", isinstance(payload.get("included"), list))
+        check("every item has attributes.item_type", all("item_type" in it["attributes"] for it in items))
+        check("every item has attributes.sequence", all("sequence" in it["attributes"] for it in items))
+        check(
+            "every song item has relationships.song.data",
+            all((it.get("relationships") or {}).get("song", {}).get("data") for it in song_items),
+        )
+        check(
+            "item_type 'song' actually appears in this plan",
+            len(song_items) > 0,
+            "need at least one song to verify attachment shape",
+        )
+
+        if not song_items:
+            print("\n⚠ no song items in this plan; attachment shape checks skipped.")
+            return 6 if issues else 0
+
+        # Step 4: probe every place attachments could live for a song in a plan.
+        # PCO's attachment model is polymorphic — `attachable_type` can be
+        # Song, Arrangement, Item, Plan, Media, Key, ServiceType. Different
+        # orgs use different conventions, so we look at all of them.
+        print("\nStep 4: probe every attachment location for songs in this plan")
+        sample_att = None
+        sample_att_parent_path = None  # the URL prefix for the /open action
+
+        def _print_atts(label: str, atts: list) -> None:
+            print(f"  {label}: {len(atts)} attachment(s)")
+            for a in atts:
+                attrs = a.get("attributes", {})
+                attachable = (a.get("relationships") or {}).get("attachable", {}).get("data") or {}
+                a_type = attachable.get("type") or attrs.get("attachable_type") or "?"
+                a_id = attachable.get("id") or "?"
+                print(
+                    f"      attachment_id={a['id']}  filename={attrs.get('filename')!r}  "
+                    f"content_type={attrs.get('content_type')!r}  "
+                    f"attachable={a_type}:{a_id}"
+                )
+
+        # 4a — plan-level all_attachments (sweeps Song, Arrangement, Item, Plan, ...)
+        print(f"\n  4a. GET /services/v2/service_types/{st_id}/plans/{plan_id}/all_attachments")
+        try:
+            payload = client.get(
+                f"/services/v2/service_types/{st_id}/plans/{plan_id}/all_attachments",
+                params={"per_page": 100},
+            )
+        except pcomod.PCOError as e:
+            print(f"    ✗ request failed: {e}")
+            payload = {"data": []}
+        plan_all = payload.get("data") or []
+        _print_atts("all_attachments", plan_all)
+        by_type: dict[str, int] = {}
+        for a in plan_all:
+            attachable = (a.get("relationships") or {}).get("attachable", {}).get("data") or {}
+            by_type[attachable.get("type", "?")] = by_type.get(attachable.get("type", "?"), 0) + 1
+        if by_type:
+            print(f"    → by attachable_type: {by_type}")
+
+        # 4b — per-song probe: Song attachments + Arrangement(s) + their attachments + Item selected_attachment
+        for it in song_items:
+            sid = it["relationships"]["song"]["data"]["id"]
+            item_id = it["id"]
+            song_title = next(
+                (s["attributes"]["title"] for s in songs_inc if s["id"] == sid),
+                it["attributes"].get("title") or "(untitled)",
+            )
+            print(f"\n  song {sid} {song_title!r}  (item {item_id})")
+
+            # song-level attachments
+            try:
+                song_atts = pcomod.list_song_attachments(client, sid)
+            except pcomod.PCOError as e:
+                print(f"    ✗ GET /songs/{sid}/attachments failed: {e}")
+                song_atts = []
+            _print_atts(f"    /songs/{sid}/attachments", song_atts)
+
+            # arrangements
+            try:
+                arr_payload = client.get(
+                    f"/services/v2/songs/{sid}/arrangements",
+                    params={"per_page": 25},
+                )
+            except pcomod.PCOError as e:
+                print(f"    ✗ GET /songs/{sid}/arrangements failed: {e}")
+                arr_payload = {"data": []}
+            arrangements = arr_payload.get("data") or []
+            print(f"    /songs/{sid}/arrangements: {len(arrangements)} arrangement(s)")
+            for arr in arrangements:
+                arr_id = arr["id"]
+                arr_name = arr["attributes"].get("name") or arr["attributes"].get("print_margin") or "(unnamed)"
+                print(f"      arrangement_id={arr_id}  name={arr_name!r}")
+                try:
+                    arr_atts_payload = client.get(
+                        f"/services/v2/songs/{sid}/arrangements/{arr_id}/attachments",
+                        params={"per_page": 100},
+                    )
+                    arr_atts = arr_atts_payload.get("data") or []
+                except pcomod.PCOError as e:
+                    print(f"        ✗ GET attachments for arrangement {arr_id}: {e}")
+                    arr_atts = []
+                _print_atts(f"        arrangement {arr_id} attachments", arr_atts)
+                if sample_att is None:
+                    chords = [a for a in arr_atts if pcomod.is_chord_doc_attachment(a)]
+                    if chords:
+                        sample_att = chords[0]
+                        sample_att_parent_path = (
+                            f"/services/v2/songs/{sid}/arrangements/{arr_id}"
+                        )
+
+            # selected_attachment on this plan's Item
+            try:
+                sel = client.get(
+                    f"/services/v2/service_types/{st_id}/plans/{plan_id}/items/{item_id}/selected_attachment"
+                )
+                sel_data = sel.get("data")
+            except pcomod.PCOError as e:
+                print(f"    ✗ GET item/selected_attachment failed: {e}")
+                sel_data = None
+            if sel_data:
+                _print_atts(f"    items/{item_id}/selected_attachment", [sel_data])
+            else:
+                print(f"    items/{item_id}/selected_attachment: (none)")
+
+            # selected Key on this plan's Item (and its attachments, if any)
+            try:
+                key_resp = client.get(
+                    f"/services/v2/service_types/{st_id}/plans/{plan_id}/items/{item_id}/key"
+                )
+                key_data = key_resp.get("data")
+            except pcomod.PCOError as e:
+                print(f"    ✗ GET item/key failed: {e}")
+                key_data = None
+            if key_data:
+                key_id = key_data["id"]
+                key_name = key_data.get("attributes", {}).get("name") or "(unnamed)"
+                print(f"    items/{item_id}/key: key_id={key_id} name={key_name!r}")
+                # Key attachments live under the arrangement that the key belongs to.
+                # We probe both possible paths.
+                arr_rel = (key_data.get("relationships") or {}).get("arrangement", {}).get("data")
+                if arr_rel:
+                    arr_id_for_key = arr_rel["id"]
+                    try:
+                        key_atts_payload = client.get(
+                            f"/services/v2/songs/{sid}/arrangements/{arr_id_for_key}/keys/{key_id}/attachments",
+                            params={"per_page": 100},
+                        )
+                        key_atts = key_atts_payload.get("data") or []
+                    except pcomod.PCOError as e:
+                        print(f"      ✗ GET key attachments: {e}")
+                        key_atts = []
+                    _print_atts(f"      key {key_id} attachments", key_atts)
+                    if sample_att is None:
+                        chords = [a for a in key_atts if pcomod.is_chord_doc_attachment(a)]
+                        if chords:
+                            sample_att = chords[0]
+                            sample_att_parent_path = (
+                                f"/services/v2/songs/{sid}/arrangements/{arr_id_for_key}/keys/{key_id}"
+                            )
+            else:
+                print(f"    items/{item_id}/key: (none)")
+
+            if sample_att is None and song_atts:
+                chords = [a for a in song_atts if pcomod.is_chord_doc_attachment(a)]
+                if chords:
+                    sample_att = chords[0]
+                    sample_att_parent_path = f"/services/v2/songs/{sid}"
+
+        # Step 5: exercise the open action so we know download will work.
+        if sample_att is None:
+            print(
+                "\n⚠ no chord-named .doc/.docx attachments found at any of the probed "
+                "locations; open-action check skipped."
+            )
+        else:
+            print(
+                f"\nStep 5: POST {sample_att_parent_path}/attachments/{sample_att['id']}/open"
+            )
+            try:
+                resp = client.post(
+                    f"{sample_att_parent_path}/attachments/{sample_att['id']}/open"
+                )
+            except pcomod.PCOError as e:
+                print(f"  ✗ request failed: {e}")
+                return 6
+            data = (resp or {}).get("data") or {}
+            attrs = data.get("attributes") or {}
+            url = attrs.get("attachment_url") or ""
+            host = re.sub(r"^https?://([^/?#]+).*", r"\1", url) if url else ""
+            print(f"  ✓ HTTP 200, AttachmentActivity received")
+            check("data.attributes.attachment_url is present", bool(url), "needed for download")
+            check("attachment_url uses https://", url.startswith("https://"), "signed CDN URL expected")
+            if host:
+                print(f"      attachment_url host: {host}")
+
+    print()
+    if issues:
+        print(f"FAIL: {len(issues)} shape issue(s) found:")
+        for s in issues:
+            print(f"  - {s}")
+        return 6
+    print("OK: all shape checks passed.")
+    return 0
+
+
 def cmd_pco_build(args: argparse.Namespace) -> int:
     config = load_config()
     import pco as pcomod
@@ -737,6 +1077,7 @@ def cmd_pco_build(args: argparse.Namespace) -> int:
     with pcomod.PCOClient(pco_config) as client:
         plan, _stid, st_name, resolutions = _pco_resolve_plan(client, args)
         all_resolved = _print_pco_resolutions(resolutions, plan, st_name)
+        sys.stdout.flush()
         if not all_resolved:
             sys.stderr.write(
                 "\nPCO_AMBIGUOUS_ATTACHMENT: cannot build until every song is picked.\n"
@@ -830,6 +1171,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Binder filename (without .pdf). Defaults to 'Binder YYYY-MM-DD'.",
     )
     p_pco_build.set_defaults(func=cmd_pco_build)
+
+    p_pco_doctor = sub.add_parser(
+        "pco-doctor",
+        help="Verify PCO connectivity and resource shapes (prints structural info only — no credentials).",
+    )
+    p_pco_doctor.set_defaults(func=cmd_pco_doctor)
 
     return p
 

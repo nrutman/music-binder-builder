@@ -247,25 +247,34 @@ def list_song_items(
     client: PCOClient,
     service_type_id: str,
     plan_id: str,
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Return (song_items_in_sequence_order, songs_by_id_from_included).
-    Skips non-song items (headers, media, regular items)."""
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, dict[str, Any]]]]:
+    """Return (song_items_in_sequence_order, included_by_type_id).
+
+    `included_by_type_id` is keyed by JSON-API type ("Song", "Arrangement",
+    "Key", …) and inner-keyed by id. The items list contains only items
+    whose `item_type` is "song"."""
     items: list[dict[str, Any]] = []
-    songs_by_id: dict[str, dict[str, Any]] = {}
+    included: dict[str, dict[str, dict[str, Any]]] = {}
     for item, payload in client.get_all(
         f"/services/v2/service_types/{service_type_id}/plans/{plan_id}/items",
-        params={"include": "song", "per_page": 100, "order": "sequence"},
+        params={
+            "include": "song,arrangement,key",
+            "per_page": 100,
+            "order": "sequence",
+        },
     ):
         for inc in payload.get("included", []):
-            if inc.get("type") == "Song":
-                songs_by_id[inc["id"]] = inc
+            included.setdefault(inc.get("type", "?"), {})[inc["id"]] = inc
         if item["attributes"].get("item_type") == "song":
             items.append(item)
     items.sort(key=lambda it: it["attributes"].get("sequence", 0))
-    return items, songs_by_id
+    return items, included
 
 
 def list_song_attachments(client: PCOClient, song_id: str) -> list[dict[str, Any]]:
+    """List attachments directly attached to a Song record. Kept for the
+    pco-doctor diagnostic; the resolver uses `list_plan_all_attachments`
+    instead because chord charts typically live on Keys, not on Songs."""
     return [
         att
         for att, _payload in client.get_all(
@@ -275,17 +284,38 @@ def list_song_attachments(client: PCOClient, song_id: str) -> list[dict[str, Any
     ]
 
 
+def list_plan_all_attachments(
+    client: PCOClient,
+    service_type_id: str,
+    plan_id: str,
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Fetch every attachment hanging off a plan (regardless of which
+    resource it's attached to — Song, Arrangement, Key, Item, Plan, Media)
+    and group them by (attachable_type, attachable_id).
+
+    Uses the `/all_attachments` endpoint, which is a single network call
+    covering the whole plan instead of N+1 calls walking each song."""
+    by_attachable: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for att, _payload in client.get_all(
+        f"/services/v2/service_types/{service_type_id}/plans/{plan_id}/all_attachments",
+        params={"per_page": 100},
+    ):
+        attachable = (att.get("relationships") or {}).get("attachable", {}).get("data") or {}
+        key = (attachable.get("type") or "", attachable.get("id") or "")
+        by_attachable.setdefault(key, []).append(att)
+    return by_attachable
+
+
 # ---------------------------------------------------------------------------
 # Attachment download (two-step: POST .../open → GET signed URL)
 # ---------------------------------------------------------------------------
 
 
-def open_attachment_url(client: PCOClient, song_id: str, attachment_id: str) -> str:
-    """POST to the attachment's `open` action and return the short-lived
-    signed download URL from the resulting AttachmentActivity."""
-    resp = client.post(
-        f"/services/v2/songs/{song_id}/attachments/{attachment_id}/open"
-    )
+def open_attachment_url(client: PCOClient, parent_path: str, attachment_id: str) -> str:
+    """POST to the attachment's `open` action at the given parent path (e.g.
+    `/services/v2/songs/{sid}/arrangements/{aid}/keys/{kid}`) and return the
+    short-lived signed download URL from the AttachmentActivity response."""
+    resp = client.post(f"{parent_path}/attachments/{attachment_id}/open")
     try:
         return resp["data"]["attributes"]["attachment_url"]
     except (KeyError, TypeError) as e:
@@ -307,7 +337,8 @@ def download_resolved_attachments(
     with httpx.Client(timeout=60.0, follow_redirects=True) as anon:
         for r in resolutions:
             assert r.picked is not None, "download called on unresolved song"
-            url = open_attachment_url(client, r.song_id, r.picked["id"])
+            assert r.picked_parent_path is not None, "resolution missing parent path"
+            url = open_attachment_url(client, r.picked_parent_path, r.picked["id"])
             resp = anon.get(url)
             if resp.status_code != 200:
                 raise PCOError(
@@ -367,10 +398,39 @@ class SongResolution:
     song_id: str
     song_title: str
     item_title: str
-    chord_candidates: list[dict[str, Any]]  # chord-named .doc/.docx attachments
-    doc_candidates: list[dict[str, Any]]    # all .doc/.docx (for 0-chord fallback display)
+    arrangement_id: str | None              # the item's selected arrangement, if any
+    key_id: str | None                       # the item's selected key, if any
+    chord_candidates: list[dict[str, Any]]  # chord-named .doc/.docx attachments found at the best level
+    chord_source: str | None                 # "Key" | "Arrangement" | "Song" — where chord_candidates were found
+    doc_candidates: list[dict[str, Any]]    # all .doc/.docx across Song/Arr/Key (for the 0-chord fallback display)
     picked: dict[str, Any] | None           # the chosen attachment, or None if ambiguous
     pick_source: str | None                 # "auto" | "pick" | None
+    picked_parent_path: str | None          # parent URL path for the picked attachment's /open action
+
+
+def _attachable_parent_path(
+    att: dict[str, Any],
+    song_id: str,
+    arrangement_id: str | None,
+) -> str | None:
+    """Build the URL path that prefixes `/attachments/{id}/open` for `att`,
+    based on the attachment's `attachable` relationship. Returns None if
+    we can't construct a usable path (e.g. attachable on something we
+    don't know how to address)."""
+    attachable = (att.get("relationships") or {}).get("attachable", {}).get("data") or {}
+    a_type = attachable.get("type")
+    a_id = attachable.get("id")
+    if not a_type or not a_id:
+        return None
+    if a_type == "Key":
+        if not arrangement_id:
+            return None
+        return f"/services/v2/songs/{song_id}/arrangements/{arrangement_id}/keys/{a_id}"
+    if a_type == "Arrangement":
+        return f"/services/v2/songs/{song_id}/arrangements/{a_id}"
+    if a_type == "Song":
+        return f"/services/v2/songs/{a_id}"
+    return None
 
 
 def resolve_plan_songs(
@@ -379,14 +439,19 @@ def resolve_plan_songs(
     plan_id: str,
     picks: dict[str, str],
 ) -> list[SongResolution]:
-    """Walk a plan's song items, fetch each song's attachments, apply the
-    auto-resolution rule (exactly one chord-named .doc/.docx → use it) and
-    any --pick overrides. Returns one SongResolution per song item in
-    sequence order. Songs that remain unresolved have `picked=None`."""
-    items, songs_by_id = list_song_items(client, service_type_id, plan_id)
+    """Walk a plan's song items, find each song's chord-sheet attachment
+    (preferring Key-level over Arrangement-level over Song-level), apply
+    auto-resolution (exactly one chord-named .doc/.docx → use it) and any
+    --pick overrides. Returns one SongResolution per song item in sequence
+    order. Songs that remain unresolved have `picked=None`."""
+    items, included = list_song_items(client, service_type_id, plan_id)
+    songs_by_id = included.get("Song", {})
+    by_attachable = list_plan_all_attachments(client, service_type_id, plan_id)
+
     resolutions: list[SongResolution] = []
     for item in items:
-        song_rel = (item.get("relationships") or {}).get("song", {}).get("data")
+        rels = item.get("relationships") or {}
+        song_rel = rels.get("song", {}).get("data")
         if not song_rel:
             sys.stderr.write(
                 f"  ⚠ Item {item['id']} ({item['attributes'].get('title')!r}) has "
@@ -394,6 +459,11 @@ def resolve_plan_songs(
             )
             continue
         song_id = song_rel["id"]
+        arr_rel = rels.get("arrangement", {}).get("data") or {}
+        key_rel = rels.get("key", {}).get("data") or {}
+        arrangement_id = arr_rel.get("id")
+        key_id = key_rel.get("id")
+
         song = songs_by_id.get(song_id)
         item_attrs = item["attributes"]
         song_title = (
@@ -403,25 +473,67 @@ def resolve_plan_songs(
         )
         item_title = item_attrs.get("title") or song_title
 
-        atts = list_song_attachments(client, song_id)
-        chords = [a for a in atts if is_chord_doc_attachment(a)]
-        docs = [a for a in atts if is_doc_attachment(a)]
+        # Collect candidates at every level (for both the chord filter and
+        # the 0-chord fallback display).
+        key_atts = by_attachable.get(("Key", key_id), []) if key_id else []
+        arr_atts = by_attachable.get(("Arrangement", arrangement_id), []) if arrangement_id else []
+        song_atts = by_attachable.get(("Song", song_id), [])
+
+        # Look for chord-named .doc/.docx, preferring the most specific
+        # level. In this org's convention chord charts live on Keys.
+        chords: list[dict[str, Any]] = []
+        chord_source: str | None = None
+        for level_name, level_atts in (
+            ("Key", key_atts),
+            ("Arrangement", arr_atts),
+            ("Song", song_atts),
+        ):
+            matched = [a for a in level_atts if is_chord_doc_attachment(a)]
+            if matched:
+                chords = matched
+                chord_source = level_name
+                break
+
+        all_docs = [
+            a
+            for a in (key_atts + arr_atts + song_atts)
+            if is_doc_attachment(a)
+        ]
+        # De-duplicate by id while preserving order.
+        seen_ids: set[str] = set()
+        doc_candidates: list[dict[str, Any]] = []
+        for a in all_docs:
+            if a["id"] in seen_ids:
+                continue
+            seen_ids.add(a["id"])
+            doc_candidates.append(a)
 
         picked: dict[str, Any] | None = None
         pick_source: str | None = None
         if song_id in picks:
             target = picks[song_id]
-            picked = next((a for a in atts if a["id"] == target), None)
+            picked = next((a for a in doc_candidates if a["id"] == target), None)
             if picked:
                 pick_source = "pick"
             else:
                 sys.stderr.write(
-                    f"  ⚠ --pick {song_id}={target}: attachment not found on "
-                    f"song {song_title!r}; treating as unresolved.\n"
+                    f"  ⚠ --pick {song_id}={target}: attachment not found among "
+                    f".doc/.docx attachments for song {song_title!r}; treating as unresolved.\n"
                 )
         elif len(chords) == 1:
             picked = chords[0]
             pick_source = "auto"
+
+        picked_parent_path = (
+            _attachable_parent_path(picked, song_id, arrangement_id) if picked else None
+        )
+        if picked and picked_parent_path is None:
+            sys.stderr.write(
+                f"  ⚠ Could not construct a download path for attachment "
+                f"{picked['id']} on song {song_title!r}; treating as unresolved.\n"
+            )
+            picked = None
+            pick_source = None
 
         resolutions.append(
             SongResolution(
@@ -429,10 +541,14 @@ def resolve_plan_songs(
                 song_id=song_id,
                 song_title=song_title,
                 item_title=item_title,
+                arrangement_id=arrangement_id,
+                key_id=key_id,
                 chord_candidates=chords,
-                doc_candidates=docs,
+                chord_source=chord_source,
+                doc_candidates=doc_candidates,
                 picked=picked,
                 pick_source=pick_source,
+                picked_parent_path=picked_parent_path,
             )
         )
     return resolutions

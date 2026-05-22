@@ -138,8 +138,13 @@ uv run scripts/build_binder.py pco-resolve --date 2026-05-24
 This:
 - Looks up the PCO plan whose `sort_date` falls on the given date.
 - Lists every song item in plan order.
-- For each song, picks the `.doc`/`.docx` attachment whose filename contains "Chord" (case-insensitive) when exactly one matches.
-- For songs with 0 or 2+ chord-named attachments, reports the candidates and exits with `PCO_AMBIGUOUS_ATTACHMENT` (exit code 6).
+- For each song, looks up `.doc`/`.docx` attachments scoped to the item's selected **Key** first (chord charts live on Keys in this org), then **Arrangement**, then **Song** — stopping at the first level that has a chord-named match.
+- Picks the chord-named attachment when exactly one matches at the best level.
+- For songs with 0 or 2+ chord-named attachments, reports the candidates (including the level they were found on) and exits with `PCO_AMBIGUOUS_ATTACHMENT` (exit code 6). Capo variants (`Song - Chord.docx` + `Song - Chord Capo.docx` on the same Key) are a common 2+ case.
+
+### Diagnostic: pco-doctor
+
+If PCO mode is misbehaving, run `uv run scripts/build_binder.py pco-doctor` for a read-only connectivity + shape check. It probes every attachment location (Song / Arrangement / Key / Item) for a recent past plan and prints structural info only — never credentials.
 
 ### 3. Handle ambiguities and special cases
 
