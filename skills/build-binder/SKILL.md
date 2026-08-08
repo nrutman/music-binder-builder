@@ -1,22 +1,15 @@
 ---
 name: build-binder
 description: >
-  Build a printable PDF "binder" of chord sheets for live performance. Works in
-  two modes: (1) LOCAL — user supplies a list of song titles; the skill
-  fuzzy-matches them against the user's chord-sheet folder; (2) PLANNING CENTER
-  — user supplies a service date; the skill looks up the Planning Center
-  Services plan for that date and pulls the chord-sheet attachment for each
-  song in plan order. In both modes the chosen .doc/.docx files are converted
-  to PDF via LibreOffice and merged so page 1 is alone and every two-page song
-  lands on a single spread (2-3, 4-5, 6-7, …) without crossing.
-  TRIGGER when: the user asks to build a binder, setlist PDF, chord sheet binder,
-  worship binder, etc. — either with a list of song titles (local mode) or with
-  a service date / "the Sunday service" / "this week's plan" (PCO mode). Phrases
-  like "build a binder for Sunday May 24", "make me a chord sheet PDF with
-  these songs", "binder this setlist", "build a binder from Planning Center".
-  DO NOT TRIGGER when: the user wants to author or edit a chord sheet (that's a
-  different repo / workflow), wants to merge already-PDF files (this skill is for
-  .doc/.docx source files), or is asking general questions about the repo.
+  Build a print-ready PDF binder of chord sheets. In local mode, fuzzy-match a
+  supplied setlist against the user's .doc/.docx chord-sheet folder. In Planning
+  Center mode, use a service date to find the plan and download each song's
+  chord-sheet attachment in plan order. Convert sources with LibreOffice and
+  merge them so page 1 stands alone and two-page songs never cross a spread.
+  Trigger for requests to build a music, worship, chord-sheet, or setlist binder
+  from song titles, a service date, "tomorrow's service," "this week's plan," or
+  Planning Center. Do not trigger for authoring or editing chord sheets, merging
+  existing PDFs, or general questions about this repository.
 user-invocable: true
 ---
 
